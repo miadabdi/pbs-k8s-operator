@@ -15,14 +15,15 @@ limitations under the License.
 */
 
 // pbs-agent is the entrypoint of the backup/restore Jobs created by the
-// pbs-operator. This scaffold only parses the subcommand; the real backup and
-// restore logic (proxmox-backup-client invocation, staging, exit reporting)
-// arrives in a later milestone.
+// pbs-operator. The backup subcommand wraps proxmox-backup-client (logic in
+// internal/agent); restore arrives in a later milestone.
 package main
 
 import (
 	"fmt"
 	"os"
+
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/agent"
 )
 
 func main() {
@@ -30,11 +31,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: pbs-agent <backup|restore> [args...]")
 		os.Exit(2)
 	}
-	switch cmd := os.Args[1]; cmd {
-	case "backup", "restore":
-		fmt.Fprintf(os.Stderr, "pbs-agent %s: not implemented\n", cmd)
+	switch os.Args[1] {
+	case "backup":
+		pvcs, termlog, err := agent.ParseBackupArgs(os.Args[2:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pbs-agent:", err)
+			os.Exit(2)
+		}
+		os.Exit(agent.RunBackup(agent.BackupDeps{
+			Getenv:   os.Getenv,
+			Hostname: os.Hostname,
+			Environ:  os.Environ,
+			Stdout:   os.Stdout,
+			Stderr:   os.Stderr,
+			Run:      agent.ExecClient,
+		}, pvcs, termlog))
+	case "restore":
+		fmt.Fprintln(os.Stderr, "pbs-agent restore: not implemented")
+		os.Exit(2)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected backup or restore)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected backup or restore)\n", os.Args[1])
+		os.Exit(2)
 	}
-	os.Exit(2)
 }
