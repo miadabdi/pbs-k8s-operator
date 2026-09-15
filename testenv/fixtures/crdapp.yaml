@@ -1,0 +1,73 @@
+# crdapp fixture: small Deployment + ConfigMap + Secret + PVC pinned to
+# k8s-node1 — gives node1 real PVC data (RWFilesystem) so per-node backup
+# Jobs are exercised.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crdapp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crdapp-config
+  namespace: crdapp
+data:
+  app.conf: |
+    mode=testenv
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: crdapp-secret
+  namespace: crdapp
+stringData:
+  api-key: testenv-not-a-real-secret
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: crdapp-data
+  namespace: crdapp
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crdapp
+  namespace: crdapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crdapp
+  template:
+    metadata:
+      labels:
+        app: crdapp
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k8s-node1
+      containers:
+        - name: web
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/nginx/html
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: crdapp-data

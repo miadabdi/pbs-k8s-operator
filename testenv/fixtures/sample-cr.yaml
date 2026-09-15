@@ -1,0 +1,8 @@
+---
+apiVersion: examples.sharifmind.ir/v1
+kind: Probe
+metadata:
+  name: sample-probe
+  namespace: default
+spec:
+  message: hello-from-testenv

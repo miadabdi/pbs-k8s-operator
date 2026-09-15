@@ -1,0 +1,90 @@
+# pg fixture: postgres:16 StatefulSet pinned to k8s-ctl1 with a 4 MiB restore
+# probe seeded into the data volume by an initContainer. After a
+# backup/restore cycle the probe pair (probe.bin + probe.sha256) is read from
+# inside the restored volume to prove byte-identical PVC restore (in-volume
+# pair instead of the plan's ConfigMap variant: simpler, same guarantee).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pg
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg
+  namespace: pg
+spec:
+  selector:
+    app: pg
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg
+  namespace: pg
+spec:
+  serviceName: pg
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pg
+  template:
+    metadata:
+      labels:
+        app: pg
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k8s-ctl1
+      initContainers:
+        - name: probe-seed
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cd /var/lib/postgresql/data
+              # Idempotent: never re-seed over an existing probe pair.
+              if [ -f probe.bin ] && [ -f probe.sha256 ]; then
+                echo "probe already present, skipping"
+                exit 0
+              fi
+              # 4 MiB of randomness + its checksum, at the volume root.
+              # PGDATA is the pgdata/ subdir below, so initdb stays happy.
+              head -c 4194304 /dev/urandom > probe.bin
+              sha256sum probe.bin > probe.sha256
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              value: testenv
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
