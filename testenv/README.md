@@ -68,6 +68,15 @@ it must stay stable across restores.
 - The rendered `pbsrepo-testenv`/`pbsrepo-testenv-bootstrap` Secrets carry no
   namespace; they apply wherever `kubectl`'s context points (default).
 - `kubectl` must be installed on the host (`kubectl_localhost: false`).
+- registry.k8s.io is geo-blocked from the VMs (403) — quay.io and docker.io
+  are reachable, so calico/etcd/fixtures pull online; only the
+  registry.k8s.io set (kube-apiserver/controller-manager/scheduler/proxy
+  1.35.4, pause, coredns, metrics-server) is sideloaded by
+  `scripts/sideload-k8s-images.sh`: host docker (which has the proxy) pulls,
+  `docker save` writes one tar to `.image-cache/`, and both nodes import it
+  via `sudo ctr -n k8s.io images import` through the `/vagrant` sync. Needed
+  on any rebuild (up.sh runs it before kubespray; `SKIP=sideload` to skip);
+  kubespray's Check_pull_required sees the loaded images and moves on.
 - Disposable VMs reuse static IPs, so their host keys churn on every rebuild.
   `up.sh` refreshes `~/.ssh/known_hosts` for .10 (before the PBS playbook) and
   .11/.12 (before kubespray): `ssh-keygen -R` + `ssh-keyscan -H`. A host that
