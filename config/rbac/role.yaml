@@ -14,8 +14,20 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods
   - secrets
   verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
   - get
   - list
   - watch
@@ -23,24 +35,13 @@ rules:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups
-  - pbsrestores
-  - pbsschedules
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
   - update
   - watch
-- apiGroups:
-  - pbs.pbs.sharifmind.ir
-  resources:
-  - pbsbackups/finalizers
-  - pbsrestores/finalizers
-  - pbsschedules/finalizers
-  verbs:
-  - update
 - apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
@@ -60,3 +61,23 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsrestores
+  - pbsschedules
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsrestores/finalizers
+  - pbsschedules/finalizers
+  verbs:
+  - update
