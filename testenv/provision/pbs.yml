@@ -1,0 +1,335 @@
+---
+# Provision the `pbs` VM into a Proxmox Backup Server 4.2 appliance for
+# pbs-operator development. Run from testenv/:
+#   ansible-playbook -i inventory/hosts.yml provision/pbs.yml
+# Remint API tokens (secrets are generate-only): add `-e remint=true`.
+#
+# All server config goes through `proxmox-backup-manager` on the PBS host.
+- name: Proxmox Backup Server for pbs-operator testenv
+  hosts: pbs
+  become: true
+  vars:
+    pbs_host: 192.168.56.10
+    pbs_port: "8007"
+    pbs_datastore: k8s-test
+    pbs_datastore_path: /srv/pbs-local
+    pbs_namespace: test-ns
+    pbs_user: operator@pbs
+    pbs_tokens: [producer, pilot]
+    pbs_secrets_dir: /root/pbs-secrets
+    keyring: /usr/share/keyrings/proxmox-release-trixie.gpg
+    # generate-token prints the secret once, in UUID form (PBS 4.2.5 man page).
+    uuid_re: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+  tasks:
+    # 1. apt repo + package ------------------------------------------------
+    - name: Check for Proxmox release keyring (download only when absent — that host can be flaky)
+      ansible.builtin.stat:
+        path: "{{ keyring }}"
+      register: keyring_stat
+
+    - name: Fetch Proxmox release key
+      ansible.builtin.get_url:
+        url: https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg
+        dest: "{{ keyring }}"
+        mode: "0644"
+      when: not keyring_stat.stat.exists
+
+    - name: Configure PBS no-subscription apt repo
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by={{ keyring }}] http://download.proxmox.com/debian/pbs trixie pbs-no-subscription"
+        filename: proxmox-pbs
+        state: present
+
+    - name: Install proxmox-backup-server (expect 4.2.x)
+      ansible.builtin.apt:
+        # proxmox-backup-client ships with the server; listed explicitly
+        # because the keyfile step below uses it.
+        name: [proxmox-backup-server, proxmox-backup-client]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # 2. datastore ----------------------------------------------------------
+    - name: Create datastore directory
+      ansible.builtin.file:
+        path: "{{ pbs_datastore_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: List datastores
+      ansible.builtin.command: proxmox-backup-manager datastore list
+      register: pbs_datastores
+      changed_when: false
+
+    - name: Create datastore {{ pbs_datastore }}
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, datastore, create, "{{ pbs_datastore }}", "{{ pbs_datastore_path }}"]
+      when: pbs_datastore not in pbs_datastores.stdout
+
+    # 3. user + tokens ------------------------------------------------------
+    - name: List users
+      ansible.builtin.command: proxmox-backup-manager user list
+      register: pbs_users
+      changed_when: false
+
+    - name: Create user {{ pbs_user }}
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, user, create, "{{ pbs_user }}"]
+      when: pbs_user not in pbs_users.stdout
+
+    - name: Ensure VM-side secrets dir (0700; token secrets are stored here at first mint)
+      ansible.builtin.file:
+        path: "{{ pbs_secrets_dir }}"
+        state: directory
+        mode: "0700"
+
+    # PBS token secrets are generate-only: printed ONCE at mint time. The
+    # stored file /root/pbs-secrets/<token>.secret is the reuse point on
+    # re-runs (created only when the token is first minted, 0600).
+    - name: Remint — delete tokens and stored secrets (opt-in via -e remint=true)
+      when: remint | default(false) | bool
+      block:
+        - name: Delete tokens server-side
+          ansible.builtin.command:
+            argv: [proxmox-backup-manager, user, delete-token, "{{ pbs_user }}", "{{ item }}"]
+          loop: "{{ pbs_tokens }}"
+          register: token_delete
+          failed_when: >-
+            token_delete.rc != 0
+            and 'no such' not in token_delete.stderr | lower
+            and 'does not exist' not in token_delete.stderr | lower
+          changed_when: token_delete.rc == 0
+
+        - name: Delete stored token secrets
+          ansible.builtin.file:
+            path: "{{ pbs_secrets_dir }}/{{ item }}.secret"
+            state: absent
+          loop: "{{ pbs_tokens }}"
+
+    - name: Check for stored token secrets
+      ansible.builtin.stat:
+        path: "{{ pbs_secrets_dir }}/{{ item }}.secret"
+      loop: "{{ pbs_tokens }}"
+      loop_control:
+        label: "{{ item }}"
+      register: token_secret_stat
+
+    - name: Mint tokens whose secret is not stored yet
+      # `user generate-token <userid> <token-name>` per the PBS 4.2.5 man page;
+      # prints the secret ONCE on stdout.
+      ansible.builtin.command:
+        argv: [proxmox-backup-manager, user, generate-token, "{{ pbs_user }}", "{{ item.item }}"]
+      loop: "{{ token_secret_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not item.stat.exists
+      register: token_mint
+      no_log: true
+
+    - name: Store minted secrets on the VM (0600, only at first mint)
+      ansible.builtin.copy:
+        # VERIFY on first run: token values are UUIDs; if `generate-token`
+        # prints a different shape, adjust uuid_re.
+        content: "{{ item.stdout | regex_search(uuid_re) | default('', true) }}"
+        dest: "{{ pbs_secrets_dir }}/{{ item.item }}.secret"
+        mode: "0600"
+      loop: "{{ token_mint.results | selectattr('stdout', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+
+    - name: Check stored secrets are non-empty
+      ansible.builtin.stat:
+        path: "{{ pbs_secrets_dir }}/{{ item }}.secret"
+      loop: "{{ token_mint.results | selectattr('stdout', 'defined') | map(attribute='item') | list }}"
+      loop_control:
+        label: "{{ item }}"
+      register: stored_secret_stat
+
+    - name: Fail loudly if a minted secret did not parse
+      ansible.builtin.assert:
+        that: item.stat.exists and item.stat.size > 0
+        fail_msg: >-
+          Token secret for '{{ item.item }}' did not parse from `user
+          generate-token` output (stored file is empty). VERIFY the output
+          shape (`man proxmox-backup-manager`) and fix uuid_re in
+          provision/pbs.yml, then re-run with `-e remint=true`.
+      loop: "{{ stored_secret_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # 4. ACLs ---------------------------------------------------------------
+    # `acl update` is an idempotent upsert; --propagate defaults to true.
+    # Privilege separation: every grant needs BOTH the user auth-id and the
+    # token auth-id. DatastoreAdmin is listed last for {{ pbs_user }} on the
+    # datastore root in case acl entries are last-write-wins per (path,
+    # auth-id) — Admin is a superset of Reader, so that order is safe either way.
+    - name: Apply ACLs
+      ansible.builtin.command:
+        argv:
+          - proxmox-backup-manager
+          - acl
+          - update
+          - "{{ item.path }}"
+          - "{{ item.role }}"
+          - --auth-id
+          - "{{ item.who }}"
+      loop:
+        - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreBackup, who: "{{ pbs_user }}" }
+        - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreBackup, who: "{{ pbs_user }}!producer" }
+        - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreReader, who: "{{ pbs_user }}" }
+        - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreReader, who: "{{ pbs_user }}!producer" }
+        - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreAdmin, who: "{{ pbs_user }}" }
+        - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreAdmin, who: "{{ pbs_user }}!pilot" }
+      loop_control:
+        label: "{{ item.who }} -> {{ item.role }} @ {{ item.path }}"
+      changed_when: false
+
+    # 5. namespace ------------------------------------------------------------
+    - name: Ensure namespace {{ pbs_namespace }} exists (server-side pre-create)
+      # VERIFY exact CLI syntax on first run: `proxmox-backup-manager datastore
+      # namespace --help`. The PBS 4.2.5 man page lists NO `datastore namespace`
+      # subcommand, so the CLI attempt below is expected to fail on 4.2.5 and we
+      # fall back to the local debug API. Last resort (documented REST fallback):
+      #   POST /api2/json/admin/datastore/k8s-test/namespace {"name":"test-ns"}
+      # e.g. curl -k -X POST -H "Authorization: PBSAPIToken=<authid>:<secret>" \
+      #   -d name=test-ns \
+      #   https://127.0.0.1:8007/api2/json/admin/datastore/k8s-test/namespace
+      # then re-run this playbook (already-exists is tolerated).
+      ansible.builtin.shell: |
+        set -o pipefail
+        if out=$(proxmox-backup-manager datastore namespace create {{ pbs_datastore }} {{ pbs_namespace }} 2>&1); then
+          echo CREATED-CLI
+          exit 0
+        fi
+        case "$out" in *"already exist"*) echo EXISTS; exit 0;; esac
+        # VERIFY: `proxmox-backup-debug api create` body-param syntax (--name)
+        # could not be statically verified.
+        if out=$(proxmox-backup-debug api create /admin/datastore/{{ pbs_datastore }}/namespace --name {{ pbs_namespace }} 2>&1); then
+          echo CREATED-API
+          exit 0
+        fi
+        case "$out" in *"already exist"*) echo EXISTS; exit 0;; esac
+        echo "NAMESPACE-CREATE-FAILED: $out" >&2
+        echo "Create it via REST (POST /api2/json/admin/datastore/{{ pbs_datastore }}/namespace with name={{ pbs_namespace }}), then re-run." >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: ns_result
+      changed_when: "'CREATED' in ns_result.stdout"
+
+    # 6. fingerprint ----------------------------------------------------------
+    - name: Read server certificate info
+      ansible.builtin.command: proxmox-backup-manager cert info
+      register: cert_info
+      changed_when: false
+
+    - name: Extract fingerprint (colon-hex UPPERCASE, verbatim)
+      ansible.builtin.set_fact:
+        pbs_fingerprint: "{{ cert_info.stdout | regex_search('([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}') | upper }}"
+
+    - name: Sanity-check the fingerprint (sha256 = 95 chars)
+      ansible.builtin.assert:
+        that: pbs_fingerprint | length == 95
+        fail_msg: "Could not extract a colon-hex fingerprint from `cert info` output."
+
+    # 7. client encryption key ------------------------------------------------
+    - name: Check for existing client encryption key
+      ansible.builtin.stat:
+        path: /etc/proxmox-backup/encryption-key.json
+      register: keyfile_stat
+
+    - name: Create client encryption key (only if absent — NEVER regenerate; must stay stable across restores)
+      ansible.builtin.command:
+        argv: [proxmox-backup-client, key, create, --kdf, none]
+      when: not keyfile_stat.stat.exists
+
+    # 8. fetch + render to the controller -------------------------------------
+    - name: Read token secrets and keyfile from the VM
+      ansible.builtin.slurp:
+        src: "{{ item.src }}"
+      loop:
+        - { name: producer, src: "{{ pbs_secrets_dir }}/producer.secret" }
+        - { name: pilot, src: "{{ pbs_secrets_dir }}/pilot.secret" }
+        - { name: keyfile, src: /etc/proxmox-backup/encryption-key.json }
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_blobs
+      no_log: true
+
+    - name: Map VM file contents
+      ansible.builtin.set_fact:
+        pbs_files: "{{ pbs_files | default({}) | combine({item.item.name: item.content | b64decode | trim}) }}"
+      loop: "{{ vm_blobs.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      no_log: true
+
+    - name: Ensure controller secrets dir exists (0700, gitignored)
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../secrets"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Write token files + fingerprint to testenv/secrets (0600)
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ playbook_dir }}/../secrets/{{ item.dest }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: "{{ item.secret | default(false) }}"
+      loop:
+        - { dest: producer.token, content: "{{ pbs_user }}!producer:{{ pbs_files.producer }}\n", secret: true }
+        - { dest: pilot.token, content: "{{ pbs_user }}!pilot:{{ pbs_files.pilot }}\n", secret: true }
+        - { dest: fingerprint, content: "{{ pbs_fingerprint }}\n" }
+
+    - name: Write keyfile copy to testenv/secrets (0600)
+      ansible.builtin.copy:
+        content: "{{ pbs_files.keyfile }}\n"
+        dest: "{{ playbook_dir }}/../secrets/pbs-keyfile.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Render Secret pbsrepo-testenv (key names are the Milestone-1 controller contract)
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../secrets/pbsrepo-testenv.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: pbsrepo-testenv
+          type: Opaque
+          stringData:
+            host: "{{ pbs_host }}"
+            port: "{{ pbs_port }}"
+            datastore: "{{ pbs_datastore }}"
+            namespace: "{{ pbs_namespace }}"
+            tokenID: "{{ pbs_user }}!producer"
+            tokenSecret: "{{ pbs_files.producer }}"
+            fingerprint: "{{ pbs_fingerprint }}"
+            keyfile: |
+              {{ pbs_files.keyfile | indent(4) }}
+      delegate_to: localhost
+      become: false
+
+    - name: Render Secret pbsrepo-testenv-bootstrap (pilot token, namespace pre-create)
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../secrets/pbsrepo-testenv-bootstrap.yaml"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: pbsrepo-testenv-bootstrap
+          type: Opaque
+          stringData:
+            tokenID: "{{ pbs_user }}!pilot"
+            tokenSecret: "{{ pbs_files.pilot }}"
+      delegate_to: localhost
+      become: false
