@@ -1,0 +1,3 @@
+# kubespray (kubeconfig_localhost: true) fetches admin.conf here — cluster
+# credentials must never be committed.
+artifacts/

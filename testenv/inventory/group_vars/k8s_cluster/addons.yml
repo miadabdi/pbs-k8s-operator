@@ -1,0 +1,6 @@
+---
+local_path_provisioner_enabled: true
+metrics_server_enabled: true
+helm_enabled: false
+metallb_enabled: false
+cert_manager_enabled: false
