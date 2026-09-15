@@ -6,4 +6,13 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: pbsrepo-sample
 spec:
-  # TODO(user): Add fields here
+  host: 192.168.56.10
+  port: 8007
+  datastore: pbs-store
+  namespace: test-ns
+  fingerprint: "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+  secretRef:
+    name: pbs-client-creds
+    # namespace: pbs-operator-system  # empty = the operator's own namespace
+  # bootstrapTokenRef:               # optional: omit to skip namespace bootstrap
+  #   name: pbs-bootstrap-token

@@ -21,49 +21,72 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// NamespacedSecretRef references a Secret by name, optionally in a specific
+// namespace. An empty namespace means the operator's own namespace.
+type NamespacedSecretRef struct {
+	// name of the Secret.
+	Name string `json:"name"`
 
-// PBSRepoSpec defines the desired state of PBSRepo
-type PBSRepoSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of PBSRepo. Edit pbsrepo_types.go to remove/update
+	// namespace of the Secret. Empty means the operator's own namespace.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// PBSRepoSpec defines the desired state of PBSRepo.
+type PBSRepoSpec struct {
+	// host is the hostname or IP of the PBS server, e.g. "192.168.56.10".
+	Host string `json:"host"`
+
+	// port is the PBS API port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=8007
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// datastore is the PBS datastore name to back up into (min length 3, PBS rule).
+	// +kubebuilder:validation:MinLength=3
+	Datastore string `json:"datastore"`
+
+	// namespace is the PBS namespace inside the datastore, e.g. "test-ns".
+	Namespace string `json:"namespace"`
+
+	// fingerprint is the PBS server certificate fingerprint
+	// (sha256, colon-separated hex, uppercase).
+	Fingerprint string `json:"fingerprint"`
+
+	// secretRef references the Secret holding the client credentials.
+	// Expected keys: tokenID, tokenSecret, keyfile (and optionally host, port,
+	// datastore, namespace, fingerprint — CR fields win over Secret keys).
+	SecretRef NamespacedSecretRef `json:"secretRef"`
+
+	// bootstrapTokenRef references a Secret with a token capable of
+	// pre-creating the PBS namespace. Absent means skip bootstrap.
+	// +optional
+	BootstrapTokenRef NamespacedSecretRef `json:"bootstrapTokenRef,omitempty"`
 }
 
 // PBSRepoStatus defines the observed state of PBSRepo.
 type PBSRepoStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
 	// conditions represent the current state of the PBSRepo resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Condition type "Ready"; reasons include "Reachable", "Unreachable",
+	// "SecretMissing", etc. (set via meta.SetStatusCondition).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// lastProbeTime is when the PBS server was last successfully probed.
+	// +optional
+	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=pbsrepos,scope=Cluster
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 
-// PBSRepo is the Schema for the pbsrepos API
+// PBSRepo is the Schema for the pbsrepos API.
 type PBSRepo struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -82,7 +105,7 @@ type PBSRepo struct {
 
 // +kubebuilder:object:root=true
 
-// PBSRepoList contains a list of PBSRepo
+// PBSRepoList contains a list of PBSRepo.
 type PBSRepoList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

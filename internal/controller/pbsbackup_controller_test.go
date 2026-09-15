@@ -54,7 +54,10 @@ var _ = Describe("PBSBackup Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: pbsv1.PBSBackupSpec{
+						RepoRef: "test-resource",
+						PVCs:    []string{"test-pvc"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

@@ -51,10 +51,15 @@ var _ = Describe("PBSRepo Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &pbsv1.PBSRepo{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
+						Name: resourceName,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: pbsv1.PBSRepoSpec{
+						Host:        "192.168.56.10",
+						Datastore:   "pbs-store",
+						Namespace:   "test-ns",
+						Fingerprint: "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+						SecretRef:   pbsv1.NamespacedSecretRef{Name: "pbs-client-creds"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

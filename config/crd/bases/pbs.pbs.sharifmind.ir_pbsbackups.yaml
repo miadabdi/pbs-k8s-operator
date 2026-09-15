@@ -14,10 +14,20 @@ spec:
     singular: pbsbackup
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.snapshotRef
+      name: Snapshot
+      type: string
+    - jsonPath: .status.startedAt
+      name: Started
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
-        description: PBSBackup is the Schema for the pbsbackups API
+        description: PBSBackup is the Schema for the pbsbackups API.
         properties:
           apiVersion:
             description: |-
@@ -39,25 +49,83 @@ spec:
           spec:
             description: spec defines the desired state of PBSBackup
             properties:
-              foo:
-                description: foo is an example field of PBSBackup. Edit pbsbackup_types.go
-                  to remove/update
+              pvcs:
+                description: |-
+                  pvcs is an explicit list of PVC names (in the PBSBackup's namespace).
+                  Takes precedence over selector when set.
+                items:
+                  type: string
+                type: array
+              repoRef:
+                description: repoRef is the name of the PBSRepo (cluster-scoped) to
+                  back up into.
                 type: string
+              selector:
+                description: |-
+                  selector selects PVCs by label in the PBSBackup's namespace. Used only
+                  when pvcs is unset; when both are unset, all PVCs in the namespace are
+                  selected.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+            required:
+            - repoRef
             type: object
           status:
             description: status defines the observed state of PBSBackup
             properties:
+              bytes:
+                description: bytes is the total size backed up.
+                format: int64
+                type: integer
+              completedAt:
+                description: completedAt is when the backup reached a terminal phase.
+                format: date-time
+                type: string
               conditions:
-                description: |-
-                  conditions represent the current state of the PBSBackup resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                description: conditions represent the current state of the PBSBackup
+                  resource.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +184,45 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              jobs:
+                description: jobs holds one BackupJobStatus per involved node.
+                items:
+                  description: BackupJobStatus reports the k8s backup Job for one
+                    involved node.
+                  properties:
+                    job:
+                      description: job is the name of the k8s Job.
+                      type: string
+                    node:
+                      description: node is the k8s node whose PVCs this Job backs
+                        up.
+                      type: string
+                    state:
+                      description: state is a raw summary of the Job's latest condition/phase.
+                      type: string
+                  required:
+                  - job
+                  - node
+                  - state
+                  type: object
+                type: array
+              phase:
+                default: New
+                description: phase is the current lifecycle phase of the backup.
+                enum:
+                - New
+                - Scheduled
+                - Running
+                - Completed
+                - Failed
+                type: string
+              snapshotRef:
+                description: snapshotRef is the primary PBS snapshot reference, "type/id/ISO8601Z".
+                type: string
+              startedAt:
+                description: startedAt is when the backup started running.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

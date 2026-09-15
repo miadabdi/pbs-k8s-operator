@@ -21,38 +21,84 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// BackupPhase enumerates the lifecycle phases of a PBSBackup.
+// +kubebuilder:validation:Enum=New;Scheduled;Running;Completed;Failed
+type BackupPhase string
 
-// PBSBackupSpec defines the desired state of PBSBackup
+const (
+	// BackupPhaseNew is the phase of a backup that has not started yet.
+	BackupPhaseNew BackupPhase = "New"
+	// BackupPhaseScheduled is the phase of a backup waiting for its Jobs.
+	BackupPhaseScheduled BackupPhase = "Scheduled"
+	// BackupPhaseRunning is the phase of a backup whose Jobs are running.
+	BackupPhaseRunning BackupPhase = "Running"
+	// BackupPhaseCompleted is the phase of a successfully finished backup.
+	BackupPhaseCompleted BackupPhase = "Completed"
+	// BackupPhaseFailed is the phase of a failed backup.
+	BackupPhaseFailed BackupPhase = "Failed"
+)
+
+// PBSBackupSpec defines the desired state of PBSBackup.
+//
+// PVC selection: if pvcs is set it wins; else selector is used; else ALL
+// PVCs in the PBSBackup's namespace are selected. M1 backs up PVC data only
+// (API objects land in M2; hooks in M4).
 type PBSBackupSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// repoRef is the name of the PBSRepo (cluster-scoped) to back up into.
+	RepoRef string `json:"repoRef"`
 
-	// foo is an example field of PBSBackup. Edit pbsbackup_types.go to remove/update
+	// pvcs is an explicit list of PVC names (in the PBSBackup's namespace).
+	// Takes precedence over selector when set.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	PVCs []string `json:"pvcs,omitempty"`
+
+	// selector selects PVCs by label in the PBSBackup's namespace. Used only
+	// when pvcs is unset; when both are unset, all PVCs in the namespace are
+	// selected.
+	// +optional
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
+}
+
+// BackupJobStatus reports the k8s backup Job for one involved node.
+type BackupJobStatus struct {
+	// node is the k8s node whose PVCs this Job backs up.
+	Node string `json:"node"`
+
+	// job is the name of the k8s Job.
+	Job string `json:"job"`
+
+	// state is a raw summary of the Job's latest condition/phase.
+	State string `json:"state"`
 }
 
 // PBSBackupStatus defines the observed state of PBSBackup.
 type PBSBackupStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// phase is the current lifecycle phase of the backup.
+	// +kubebuilder:default=New
+	// +optional
+	Phase BackupPhase `json:"phase,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// snapshotRef is the primary PBS snapshot reference, "type/id/ISO8601Z".
+	// +optional
+	SnapshotRef string `json:"snapshotRef,omitempty"`
+
+	// jobs holds one BackupJobStatus per involved node.
+	// +optional
+	Jobs []BackupJobStatus `json:"jobs,omitempty"`
+
+	// startedAt is when the backup started running.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// completedAt is when the backup reached a terminal phase.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// bytes is the total size backed up.
+	// +optional
+	Bytes int64 `json:"bytes,omitempty"`
 
 	// conditions represent the current state of the PBSBackup resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,8 +107,11 @@ type PBSBackupStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.status.snapshotRef`
+// +kubebuilder:printcolumn:name="Started",type=date,JSONPath=`.status.startedAt`
 
-// PBSBackup is the Schema for the pbsbackups API
+// PBSBackup is the Schema for the pbsbackups API.
 type PBSBackup struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -81,7 +130,7 @@ type PBSBackup struct {
 
 // +kubebuilder:object:root=true
 
-// PBSBackupList contains a list of PBSBackup
+// PBSBackupList contains a list of PBSBackup.
 type PBSBackupList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

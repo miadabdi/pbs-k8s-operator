@@ -14,10 +14,14 @@ spec:
     singular: pbsrepo
   scope: Cluster
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    name: v1
     schema:
       openAPIV3Schema:
-        description: PBSRepo is the Schema for the pbsrepos API
+        description: PBSRepo is the Schema for the pbsrepos API.
         properties:
           apiVersion:
             description: |-
@@ -39,10 +43,67 @@ spec:
           spec:
             description: spec defines the desired state of PBSRepo
             properties:
-              foo:
-                description: foo is an example field of PBSRepo. Edit pbsrepo_types.go
-                  to remove/update
+              bootstrapTokenRef:
+                description: |-
+                  bootstrapTokenRef references a Secret with a token capable of
+                  pre-creating the PBS namespace. Absent means skip bootstrap.
+                properties:
+                  name:
+                    description: name of the Secret.
+                    type: string
+                  namespace:
+                    description: namespace of the Secret. Empty means the operator's
+                      own namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              datastore:
+                description: datastore is the PBS datastore name to back up into (min
+                  length 3, PBS rule).
+                minLength: 3
                 type: string
+              fingerprint:
+                description: |-
+                  fingerprint is the PBS server certificate fingerprint
+                  (sha256, colon-separated hex, uppercase).
+                type: string
+              host:
+                description: host is the hostname or IP of the PBS server, e.g. "192.168.56.10".
+                type: string
+              namespace:
+                description: namespace is the PBS namespace inside the datastore,
+                  e.g. "test-ns".
+                type: string
+              port:
+                default: 8007
+                description: port is the PBS API port.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              secretRef:
+                description: |-
+                  secretRef references the Secret holding the client credentials.
+                  Expected keys: tokenID, tokenSecret, keyfile (and optionally host, port,
+                  datastore, namespace, fingerprint — CR fields win over Secret keys).
+                properties:
+                  name:
+                    description: name of the Secret.
+                    type: string
+                  namespace:
+                    description: namespace of the Secret. Empty means the operator's
+                      own namespace.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - datastore
+            - fingerprint
+            - host
+            - namespace
+            - secretRef
             type: object
           status:
             description: status defines the observed state of PBSRepo
@@ -50,14 +111,8 @@ spec:
               conditions:
                 description: |-
                   conditions represent the current state of the PBSRepo resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  Condition type "Ready"; reasons include "Reachable", "Unreachable",
+                  "SecretMissing", etc. (set via meta.SetStatusCondition).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +171,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastProbeTime:
+                description: lastProbeTime is when the PBS server was last successfully
+                  probed.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

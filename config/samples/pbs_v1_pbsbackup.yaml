@@ -6,4 +6,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: pbsbackup-sample
 spec:
-  # TODO(user): Add fields here
+  repoRef: pbsrepo-sample
+  # PVC selection: pvcs wins if set; else selector; else all PVCs in this namespace.
+  pvcs:
+    - pvc-sample
+  # selector:
+  #   matchLabels:
+  #     backup: pbs
