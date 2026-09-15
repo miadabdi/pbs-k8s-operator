@@ -117,13 +117,12 @@
 
     - name: Mint tokens whose secret is not stored yet
       # `user generate-token <userid> <token-name>` per the PBS 4.2.5 man page;
-      # prints the secret ONCE on stdout.
+      # prints the secret ONCE on stdout. Loops over pbs_tokens directly so the
+      # register's item is the token NAME (not a nested stat result).
       ansible.builtin.command:
-        argv: [proxmox-backup-manager, user, generate-token, "{{ pbs_user }}", "{{ item.item }}"]
-      loop: "{{ token_secret_stat.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when: not item.stat.exists
+        argv: [proxmox-backup-manager, user, generate-token, "{{ pbs_user }}", "{{ item }}"]
+      loop: "{{ pbs_tokens }}"
+      when: not (token_secret_stat.results | selectattr('item', 'equalto', item) | map(attribute='stat.exists') | first)
       register: token_mint
       no_log: true
 
@@ -139,22 +138,23 @@
         label: "{{ item.item }}"
       no_log: true
 
-    - name: Check stored secrets are non-empty
+    - name: Check stored token secrets (all tokens, unconditionally)
       ansible.builtin.stat:
         path: "{{ pbs_secrets_dir }}/{{ item }}.secret"
-      loop: "{{ token_mint.results | selectattr('stdout', 'defined') | map(attribute='item') | list }}"
-      loop_control:
-        label: "{{ item }}"
+      loop: "{{ pbs_tokens }}"
       register: stored_secret_stat
 
-    - name: Fail loudly if a minted secret did not parse
+    - name: Fail loudly if any stored secret is missing or empty
+      # Covers both a fresh mint that failed to parse and an aborted earlier run
+      # (which would otherwise leave a silently-empty tokenSecret downstream).
       ansible.builtin.assert:
         that: item.stat.exists and item.stat.size > 0
         fail_msg: >-
-          Token secret for '{{ item.item }}' did not parse from `user
-          generate-token` output (stored file is empty). VERIFY the output
-          shape (`man proxmox-backup-manager`) and fix uuid_re in
-          provision/pbs.yml, then re-run with `-e remint=true`.
+          Stored secret for '{{ item.item }}' is missing or empty. Either a
+          previous run aborted, or the secret did not parse from `user
+          generate-token` output — VERIFY the output shape (`man
+          proxmox-backup-manager`) and fix uuid_re in provision/pbs.yml, then
+          re-run with `-e remint=true`.
       loop: "{{ stored_secret_stat.results }}"
       loop_control:
         label: "{{ item.item }}"
@@ -294,6 +294,7 @@
         mode: "0600"
       delegate_to: localhost
       become: false
+      no_log: true
 
     - name: Render Secret pbsrepo-testenv (key names are the Milestone-1 controller contract)
       ansible.builtin.copy:
@@ -317,6 +318,7 @@
               {{ pbs_files.keyfile | indent(4) }}
       delegate_to: localhost
       become: false
+      no_log: true
 
     - name: Render Secret pbsrepo-testenv-bootstrap (pilot token, namespace pre-create)
       ansible.builtin.copy:
@@ -333,3 +335,4 @@
             tokenSecret: "{{ pbs_files.pilot }}"
       delegate_to: localhost
       become: false
+      no_log: true

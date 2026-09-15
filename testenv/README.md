@@ -32,8 +32,8 @@ kubeconfig, kubespray checkout) is gitignored under `secrets/`, `artifacts/`,
 6. `export KUBECONFIG=$PWD/artifacts/admin.conf`, untaint `k8s-ctl1`
    (`kubectl taint node k8s-ctl1 node-role.kubernetes.io/control-plane:NoSchedule- || true`),
    wait for both nodes Ready
-7. `kubectl apply -f fixtures/` + `secrets/pbsrepo-testenv.yaml` +
-   `secrets/pbsrepo-testenv-bootstrap.yaml`
+7. apply fixtures (CRD first, wait for Established, then the directory) +
+   `secrets/pbsrepo-testenv.yaml` + `secrets/pbsrepo-testenv-bootstrap.yaml`
 8. Spread check: fixture pods must run on BOTH nodes and all PVCs must be
    Bound — `up.sh` fails loudly otherwise.
 

@@ -48,6 +48,7 @@ step "6/8 kubeconfig + untaint guard + wait for nodes"
 mkdir -p artifacts
 if [ -f inventory/artifacts/admin.conf ]; then
   cp inventory/artifacts/admin.conf artifacts/admin.conf
+  chmod 0600 artifacts/admin.conf
 fi
 export KUBECONFIG="$PWD/artifacts/admin.conf"
 [ -f "$KUBECONFIG" ] || { echo "ERROR: $KUBECONFIG missing — run without SKIP=kubespray first" >&2; exit 1; }
@@ -57,14 +58,21 @@ kubectl wait --for=condition=Ready node/k8s-node1 --timeout=900s
 
 if ! skip apply; then
   step "7/8 fixtures + PBS secrets"
+  # CRD first (a directory apply would sort sample-cr.yaml before
+  # sample-crd.yaml and fail with "no matches for kind Probe"), and wait for
+  # the CRD to be Established before the CR lands.
+  kubectl apply -f fixtures/sample-crd.yaml
+  kubectl wait --for=condition=Established crd/probes.examples.sharifmind.ir --timeout=120s
   kubectl apply -f fixtures/
   kubectl apply -f secrets/pbsrepo-testenv.yaml
   kubectl apply -f secrets/pbsrepo-testenv-bootstrap.yaml
 fi
 
 step "8/8 spread check (fixture pods on BOTH nodes, all PVCs Bound)"
-kubectl wait --for=condition=Ready pod -n pg -l app=pg --timeout=600s
-kubectl wait --for=condition=Ready pod -n crdapp -l app=crdapp --timeout=600s
+# rollout status (unlike `kubectl wait` on a label selector) tolerates the
+# window before the pod objects exist.
+kubectl rollout status statefulset/pg -n pg --timeout=600s
+kubectl rollout status deployment/crdapp -n crdapp --timeout=600s
 pg_node="$(kubectl get pod -n pg -l app=pg -o jsonpath='{.items[0].spec.nodeName}')"
 app_node="$(kubectl get pod -n crdapp -l app=crdapp -o jsonpath='{.items[0].spec.nodeName}')"
 [ "$pg_node" = "k8s-ctl1" ] || { echo "FAIL: pg pod runs on '$pg_node', expected k8s-ctl1" >&2; exit 1; }
