@@ -183,8 +183,9 @@ func main() {
 	}
 
 	if err := (&controller.PBSRepoReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("pbsrepo"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsrepo")
 		os.Exit(1)

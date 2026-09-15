@@ -5,10 +5,24 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups
-  - pbsrepos
   - pbsrestores
   - pbsschedules
   verbs:
@@ -23,7 +37,6 @@ rules:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups/finalizers
-  - pbsrepos/finalizers
   - pbsrestores/finalizers
   - pbsschedules/finalizers
   verbs:
@@ -39,3 +52,11 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsrepos
+  verbs:
+  - get
+  - list
+  - watch
