@@ -180,6 +180,22 @@ var _ = Describe("PBSRepo Controller", func() {
 		Expect(drainEvents(rec)).To(HaveLen(1))
 	})
 
+	It("spec.fingerprint wins over the secret's fingerprint key", func() {
+		srv := pbstest.Start()
+		DeferCleanup(srv.Close)
+		repo := newTestRepo("repo-fp-precedence", srv)
+		repo.Spec.Host, repo.Spec.Port = srv.Host(), int32(srv.Port())
+		Expect(k8sClient.Create(ctx, repo)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
+		// Secret carries the WRONG pin; the CR carries the right one.
+		createSecret(ctx, repo.Spec.SecretRef.Name, "default", credsKeys(producerTokenID, producerTokenSecret, wrongFingerprint))
+
+		res := doReconcile(ctx, repo.Name, record.NewFakeRecorder(16))
+
+		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
+		Expect(readyCondition(ctx, repo.Name).Reason).To(Equal("Reachable"))
+	})
+
 	It("healthy + bootstrap → Ready=True Reachable, namespace POST carries the bootstrap token", func() {
 		srv := pbstest.Start()
 		DeferCleanup(srv.Close)

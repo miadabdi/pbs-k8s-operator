@@ -174,6 +174,7 @@ func (r *PBSRepoReconciler) succeed(ctx context.Context, repo *pbsv1.PBSRepo) (c
 // emits the event) and any patch error.
 func (r *PBSRepoReconciler) setCondition(ctx context.Context, repo *pbsv1.PBSRepo, cond metav1.Condition, stampProbe bool) (bool, error) {
 	before := repo.DeepCopy()
+	cond.ObservedGeneration = repo.Generation
 	transitioned := meta.SetStatusCondition(&repo.Status.Conditions, cond)
 	dirty := transitioned
 	if stampProbe && (repo.Status.LastProbeTime == nil || time.Since(repo.Status.LastProbeTime.Time) > lastProbeFreshFor) {
@@ -201,10 +202,10 @@ type repoCreds struct {
 
 // producerCreds resolves spec.secretRef. The returned problem string is a
 // user-facing SecretMissing message (empty when the credentials are usable).
-// Required secret keys: tokenID, tokenSecret, fingerprint. Optional keys
-// host/port/datastore/namespace fill gaps — CR spec fields win. The secret's
-// fingerprint is the operative pin (per the secret contract; spec.fingerprint
-// is CRD-validated but not merged).
+// Required secret keys: tokenID, tokenSecret. Fingerprint comes from
+// spec.fingerprint first, the secret's fingerprint key as fallback — at least
+// one must be set (CRD contract: CR fields win over Secret keys). Optional
+// keys host/port/datastore/namespace fill gaps — CR spec fields win.
 func (r *PBSRepoReconciler) producerCreds(ctx context.Context, repo *pbsv1.PBSRepo) (repoCreds, string, error) {
 	secret, problem, err := r.fetchSecret(ctx, repo.Spec.SecretRef)
 	if err != nil || problem != "" {
@@ -213,9 +214,16 @@ func (r *PBSRepoReconciler) producerCreds(ctx context.Context, repo *pbsv1.PBSRe
 	get := func(k string) string { return string(secret.Data[k]) }
 
 	var missing []string
-	for _, k := range []string{"tokenID", "tokenSecret", "fingerprint"} {
+	for _, k := range []string{"tokenID", "tokenSecret"} {
 		if get(k) == "" {
 			missing = append(missing, k)
+		}
+	}
+	fingerprint := repo.Spec.Fingerprint
+	if fingerprint == "" {
+		fingerprint = get("fingerprint")
+		if fingerprint == "" {
+			missing = append(missing, "fingerprint (or spec.fingerprint)")
 		}
 	}
 	if len(missing) > 0 {
@@ -238,7 +246,7 @@ func (r *PBSRepoReconciler) producerCreds(ctx context.Context, repo *pbsv1.PBSRe
 	return repoCreds{
 		tokenID:     get("tokenID"),
 		tokenSecret: get("tokenSecret"),
-		fingerprint: get("fingerprint"),
+		fingerprint: fingerprint,
 		host:        pick(repo.Spec.Host, get("host")),
 		port:        port,
 		datastore:   pick(repo.Spec.Datastore, get("datastore")),
