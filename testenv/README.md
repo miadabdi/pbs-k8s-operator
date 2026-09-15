@@ -26,9 +26,10 @@ kubeconfig, kubespray checkout) is gitignored under `secrets/`, `artifacts/`,
 2. `vagrant up pbs` → `ansible-playbook -i inventory/hosts.yml provision/pbs.yml`
 3. `vagrant up k8s-ctl1 k8s-node1`
 4. `vendor/get-kubespray.sh` (skips itself when already provisioned)
-5. `vendor/kubespray/venv/bin/ansible-playbook -i inventory/hosts.yml vendor/kubespray/cluster.yml`
-   (run from `testenv/`; admin.conf is fetched to `inventory/artifacts/` and
-   copied to `artifacts/admin.conf`)
+5. `(cd vendor/kubespray && venv/bin/ansible-playbook -i ../../inventory/hosts.yml
+   cluster.yml)` — run from inside the clone so kubespray's repo-root
+   ansible.cfg (roles_path) loads; admin.conf is fetched to
+   `inventory/artifacts/` and copied to `artifacts/admin.conf`
 6. `export KUBECONFIG=$PWD/artifacts/admin.conf`, untaint `k8s-ctl1`
    (`kubectl taint node k8s-ctl1 node-role.kubernetes.io/control-plane:NoSchedule- || true`),
    wait for both nodes Ready

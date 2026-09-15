@@ -53,10 +53,13 @@ if ! skip vendor; then
 fi
 
 if ! skip kubespray; then
-  step "5/8 kubespray cluster.yml (cwd: testenv — paths are relative to it)"
+  step "5/8 kubespray cluster.yml (run from inside the clone so its ansible.cfg loads)"
   refresh_host_key 192.168.56.11
   refresh_host_key 192.168.56.12
-  vendor/kubespray/venv/bin/ansible-playbook -i inventory/hosts.yml vendor/kubespray/cluster.yml
+  # cwd must be vendor/kubespray: its repo-root ansible.cfg (roles_path=roles:...)
+  # is only picked up from there; from testenv/ the play dies at boilerplate.yml
+  # with "role 'dynamic_groups' was not found".
+  (cd vendor/kubespray && venv/bin/ansible-playbook -i ../../inventory/hosts.yml cluster.yml)
 fi
 
 step "6/8 kubeconfig + untaint guard + wait for nodes"
