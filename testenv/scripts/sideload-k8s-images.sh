@@ -14,15 +14,18 @@ cache_dir=.image-cache
 tar_file="$cache_dir/k8s-system-images.tar"
 
 # Exact set for this config: kube 1.35.4, calico (quay.io, not listed),
-# metrics-server enabled.
+# metrics-server enabled. NOTE: published tags are inconsistent — kube-* and
+# coredns/metrics-server carry a v prefix, pause does not (verified via
+# docker manifest inspect; kubespray's map stores unprefixed versions and
+# prepends v at use-site).
 images=(
   "registry.k8s.io/kube-apiserver:v1.35.4"
   "registry.k8s.io/kube-controller-manager:v1.35.4"
   "registry.k8s.io/kube-scheduler:v1.35.4"
   "registry.k8s.io/kube-proxy:v1.35.4"
   "registry.k8s.io/pause:3.10.1"
-  "registry.k8s.io/coredns/coredns:1.12.4"
-  "registry.k8s.io/metrics-server/metrics-server:0.8.1"
+  "registry.k8s.io/coredns/coredns:v1.12.4"
+  "registry.k8s.io/metrics-server/metrics-server:v0.8.1"
 )
 nodes=(k8s-ctl1 k8s-node1)
 
