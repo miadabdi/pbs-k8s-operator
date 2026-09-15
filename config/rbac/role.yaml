@@ -1,0 +1,41 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsbackups
+  - pbsrepoes
+  - pbsrestores
+  - pbsschedules
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsbackups/finalizers
+  - pbsrepoes/finalizers
+  - pbsrestores/finalizers
+  - pbsschedules/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - pbs.pbs.sharifmind.ir
+  resources:
+  - pbsbackups/status
+  - pbsrepoes/status
+  - pbsrestores/status
+  - pbsschedules/status
+  verbs:
+  - get
+  - patch
+  - update

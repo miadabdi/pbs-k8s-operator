@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- pbs_v1_pbsrepo.yaml
+- pbs_v1_pbsbackup.yaml
+- pbs_v1_pbsschedule.yaml
+- pbs_v1_pbsrestore.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
