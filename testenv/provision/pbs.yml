@@ -17,6 +17,12 @@
     pbs_user: operator@pbs
     pbs_tokens: [producer, pilot]
     pbs_secrets_dir: /root/pbs-secrets
+    # `proxmox-backup-client key create` writes per-user XDG config
+    # ($HOME/.config/proxmox-backup/), and this playbook always runs as root —
+    # NOT /etc/proxmox-backup/ (that is the SERVER's config dir, owned by user
+    # `backup`). The existing key at this path must be preserved: never
+    # regenerate, or old backups become unreadable.
+    pbs_keyfile_path: /root/.config/proxmox-backup/encryption-key.json
     keyring: /usr/share/keyrings/proxmox-release-trixie.gpg
     # generate-token prints the secret once, in UUID form (PBS 4.2.5 man page).
     uuid_re: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
@@ -246,7 +252,7 @@
     # 7. client encryption key ------------------------------------------------
     - name: Check for existing client encryption key
       ansible.builtin.stat:
-        path: /etc/proxmox-backup/encryption-key.json
+        path: "{{ pbs_keyfile_path }}"
       register: keyfile_stat
 
     - name: Create client encryption key (only if absent — NEVER regenerate; must stay stable across restores)
@@ -261,7 +267,7 @@
       loop:
         - { name: producer, src: "{{ pbs_secrets_dir }}/producer.secret" }
         - { name: pilot, src: "{{ pbs_secrets_dir }}/pilot.secret" }
-        - { name: keyfile, src: /etc/proxmox-backup/encryption-key.json }
+        - { name: keyfile, src: "{{ pbs_keyfile_path }}" }
       loop_control:
         label: "{{ item.name }}"
       register: vm_blobs

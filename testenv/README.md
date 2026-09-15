@@ -58,7 +58,8 @@ fresh tokens:
 This deletes + re-creates `operator@pbs!producer` and `operator@pbs!pilot`,
 refreshes `secrets/*.token`, `secrets/pbsrepo-testenv*.yaml`, and re-renders
 them. The client encryption key (`secrets/pbs-keyfile.json`,
-`/etc/proxmox-backup/encryption-key.json` on the VM) is NEVER regenerated —
+`/root/.config/proxmox-backup/encryption-key.json` on the VM — the client key
+is per-user XDG and the playbook runs as root) is NEVER regenerated —
 it must stay stable across restores.
 
 ## Notes
