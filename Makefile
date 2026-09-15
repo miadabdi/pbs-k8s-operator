@@ -23,6 +23,11 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+# Everything in this repo is pure Go and the host toolchain has no working C
+# compiler (gcc-14 missing), so disable cgo for all go invocations.
+CGO_ENABLED ?= 0
+export CGO_ENABLED
+
 .PHONY: all
 all: build
 
