@@ -1,5 +1,7 @@
 ---
-kube_version: v1.35.4
+# no v prefix — kubespray checksum keys are unprefixed (and 'v' breaks its
+# version comparisons)
+kube_version: "1.35.4"
 kube_network_plugin: calico
 container_manager: containerd
 kube_proxy_mode: nftables
