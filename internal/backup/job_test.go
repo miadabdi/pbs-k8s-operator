@@ -8,13 +8,12 @@ import (
 )
 
 var fullSpec = BackupJobSpec{
-	Name:        "pg-backup",
-	Namespace:   "app",
-	Node:        "k8s-node1",
-	RepoSecret:  "pbsrepo-testenv",
-	DatastoreNS: "test-ns",
-	PVCs:        []string{"pg-data", "pg-wal"},
-	Image:       "pbs-agent:dev",
+	Name:       "pg-backup",
+	Namespace:  "app",
+	Node:       "k8s-node1",
+	RepoSecret: "pbsrepo-testenv",
+	PVCs:       []string{"pg-data", "pg-wal"},
+	Image:      "pbs-agent:dev",
 }
 
 // wantEnv is the EXACT testenv secret contract: env var -> secret key, in order.
@@ -44,6 +43,16 @@ func TestBuildBackupJob(t *testing.T) {
 	}
 	if len(job.Labels) != 2 {
 		t.Errorf("job has %d labels, want exactly 2: %v", len(job.Labels), job.Labels)
+	}
+
+	// Template carries the same labels: the controller locates the Job's pod
+	// via pbsbackup to read its termination log.
+	tl := job.Spec.Template.Labels
+	if tl["app.kubernetes.io/managed-by"] != "pbs-operator" || tl["pbsbackup"] != fullSpec.Name {
+		t.Errorf("template labels = %v, want managed-by=pbs-operator and pbsbackup=%q", tl, fullSpec.Name)
+	}
+	if len(tl) != 2 {
+		t.Errorf("template has %d labels, want exactly 2: %v", len(tl), tl)
 	}
 
 	spec := job.Spec.Template.Spec

@@ -15,7 +15,6 @@ type BackupJobSpec struct {
 	Namespace      string // PBSBackup CR namespace
 	Node           string // from ResolveNode
 	RepoSecret     string // name of the PBSRepo secret (testenv contract keys)
-	DatastoreNS    string // PBS namespace, e.g. "test-ns"
 	PVCs           []string
 	Image          string
 	ServiceAccount string // optional; empty → default
@@ -34,7 +33,9 @@ var envContract = []struct{ env, key string }{
 }
 
 // BuildBackupJob returns a complete batchv1.Job:
-//   - labels: app.kubernetes.io/managed-by=pbs-operator, pbsbackup=<Name>
+//   - labels on the Job AND its pod template (the controller finds the Job's
+//     pod via pbsbackup to read its termination log): app.kubernetes.io/
+//     managed-by=pbs-operator, pbsbackup=<Name>
 //   - nodeAffinity required, hostname In [Node]
 //   - hostname: <Name> (RFC1123-safe: CR names already are) → proxmox-backup-client
 //     derives backup-id from hostname
@@ -73,19 +74,21 @@ func BuildBackupJob(spec BackupJobSpec) *batchv1.Job {
 		}
 	}
 
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "pbs-operator",
+		"pbsbackup":                    spec.Name,
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      spec.Name,
 			Namespace: spec.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "pbs-operator",
-				"pbsbackup":                    spec.Name,
-			},
+			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptr.To[int32](0),
 			TTLSecondsAfterFinished: ptr.To[int32](3600),
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					Hostname:      spec.Name,
 					RestartPolicy: corev1.RestartPolicyNever,
