@@ -66,6 +66,10 @@ it must stay stable across restores.
 - The rendered `pbsrepo-testenv`/`pbsrepo-testenv-bootstrap` Secrets carry no
   namespace; they apply wherever `kubectl`'s context points (default).
 - `kubectl` must be installed on the host (`kubectl_localhost: false`).
+- Disposable VMs reuse static IPs, so their host keys churn on every rebuild.
+  `up.sh` refreshes `~/.ssh/known_hosts` for .10 (before the PBS playbook) and
+  .11/.12 (before kubespray): `ssh-keygen -R` + `ssh-keyscan -H`. A host that
+  is not up yet only warns — the following step fails loudly if it matters.
 - Namespace creation on PBS 4.2.5 has no `proxmox-backup-manager` subcommand;
   `provision/pbs.yml` tries the CLI, then the local debug API, then fails with
   the documented REST call (`POST /api2/json/admin/datastore/k8s-test/namespace`).

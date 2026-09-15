@@ -12,6 +12,20 @@ SKIP="${SKIP:-}"
 step() { printf '\n==> %s\n' "$*"; }
 skip() { case ",$SKIP," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
+# Disposable VMs reusing static IPs churn host keys: drop the stale entry and
+# re-scan from the fresh VM, so ansible (default host_key_checking) stays
+# non-interactive. Tolerates "no such key" AND a host that is not up yet.
+refresh_host_key() {
+  local ip="$1"
+  mkdir -p -m 700 "$HOME/.ssh"
+  ssh-keygen -R "$ip" >/dev/null 2>&1 || true
+  if ssh-keyscan -H -T 5 "$ip" >>"$HOME/.ssh/known_hosts" 2>/dev/null; then
+    echo "host key refreshed: $ip"
+  else
+    echo "WARN: $ip not reachable for keyscan (yet?)" >&2
+  fi
+}
+
 command -v vagrant >/dev/null 2>&1 || { echo "ERROR: vagrant not on PATH" >&2; exit 1; }
 command -v ansible-playbook >/dev/null 2>&1 || { echo "ERROR: ansible-playbook not on PATH" >&2; exit 1; }
 command -v kubectl >/dev/null 2>&1 || { echo "ERROR: kubectl not on PATH (kubectl_localhost is false; install kubectl on the host)" >&2; exit 1; }
@@ -24,6 +38,7 @@ fi
 if ! skip pbs; then
   step "2/8 PBS VM + provisioning"
   vagrant up pbs
+  refresh_host_key 192.168.56.10
   ansible-playbook -i inventory/hosts.yml provision/pbs.yml
 fi
 
@@ -39,6 +54,8 @@ fi
 
 if ! skip kubespray; then
   step "5/8 kubespray cluster.yml (cwd: testenv — paths are relative to it)"
+  refresh_host_key 192.168.56.11
+  refresh_host_key 192.168.56.12
   vendor/kubespray/venv/bin/ansible-playbook -i inventory/hosts.yml vendor/kubespray/cluster.yml
 fi
 

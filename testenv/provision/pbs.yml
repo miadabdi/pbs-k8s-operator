@@ -35,11 +35,20 @@
         mode: "0644"
       when: not keyring_stat.stat.exists
 
+    # Plain sources-list copy, NOT ansible.builtin.apt_repository: that module
+    # needs gpg or apt-key on the target, and bento/debian-13 ships neither.
+    # The keyring is already in place via the get_url task above; the install
+    # task below runs apt update itself (update_cache: true).
     - name: Configure PBS no-subscription apt repo
-      ansible.builtin.apt_repository:
-        repo: "deb [signed-by={{ keyring }}] http://download.proxmox.com/debian/pbs trixie pbs-no-subscription"
-        filename: proxmox-pbs
-        state: present
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pbs-client.list
+        content: "deb [signed-by={{ keyring }}] http://download.proxmox.com/debian/pbs trixie pbs-no-subscription\n"
+        mode: "0644"
+
+    - name: Remove any list file left by the earlier apt_repository attempt
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/proxmox-pbs.list
+        state: absent
 
     - name: Install proxmox-backup-server (expect 4.2.x)
       ansible.builtin.apt:
