@@ -197,30 +197,30 @@
 
     # 5. namespace ------------------------------------------------------------
     - name: Ensure namespace {{ pbs_namespace }} exists (server-side pre-create)
-      # VERIFY exact CLI syntax on first run: `proxmox-backup-manager datastore
-      # namespace --help`. The PBS 4.2.5 man page lists NO `datastore namespace`
-      # subcommand, so the CLI attempt below is expected to fail on 4.2.5 and we
-      # fall back to the local debug API. Last resort (documented REST fallback):
+      # PBS 4.2.5 has NO `datastore namespace` subcommand in
+      # proxmox-backup-manager (man page + live usage listing agree), so
+      # namespace management goes through the local debug API:
+      #   check:  proxmox-backup-debug api get    /admin/datastore/<store>/namespace
+      #   create: proxmox-backup-debug api create /admin/datastore/<store>/namespace --name <ns>
+      # Verified live on 4.2.5: `api create` DOES create the namespace but then
+      # PANICS (rc!=0) in its text_table output renderer — its exit code is
+      # meaningless here; the post-create GET is the source of truth.
+      # Last resort (documented REST fallback):
       #   POST /api2/json/admin/datastore/k8s-test/namespace {"name":"test-ns"}
-      # e.g. curl -k -X POST -H "Authorization: PBSAPIToken=<authid>:<secret>" \
-      #   -d name=test-ns \
-      #   https://127.0.0.1:8007/api2/json/admin/datastore/k8s-test/namespace
-      # then re-run this playbook (already-exists is tolerated).
+      # (curl with a token or the web UI API viewer), then re-run this playbook.
       ansible.builtin.shell: |
         set -o pipefail
-        if out=$(proxmox-backup-manager datastore namespace create {{ pbs_datastore }} {{ pbs_namespace }} 2>&1); then
-          echo CREATED-CLI
+        get_ns() { proxmox-backup-debug api get /admin/datastore/{{ pbs_datastore }}/namespace 2>/dev/null; }
+        if get_ns | grep -qw "{{ pbs_namespace }}"; then
+          echo EXISTS
           exit 0
         fi
-        case "$out" in *"already exist"*) echo EXISTS; exit 0;; esac
-        # VERIFY: `proxmox-backup-debug api create` body-param syntax (--name)
-        # could not be statically verified.
-        if out=$(proxmox-backup-debug api create /admin/datastore/{{ pbs_datastore }}/namespace --name {{ pbs_namespace }} 2>&1); then
-          echo CREATED-API
+        proxmox-backup-debug api create /admin/datastore/{{ pbs_datastore }}/namespace --name "{{ pbs_namespace }}" >/dev/null 2>&1 || true
+        if get_ns | grep -qw "{{ pbs_namespace }}"; then
+          echo CREATED
           exit 0
         fi
-        case "$out" in *"already exist"*) echo EXISTS; exit 0;; esac
-        echo "NAMESPACE-CREATE-FAILED: $out" >&2
+        echo "NAMESPACE-CREATE-FAILED: namespace {{ pbs_namespace }} not visible after create" >&2
         echo "Create it via REST (POST /api2/json/admin/datastore/{{ pbs_datastore }}/namespace with name={{ pbs_namespace }}), then re-run." >&2
         exit 1
       args:
