@@ -8,7 +8,7 @@ rules:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups
-  - pbsrepoes
+  - pbsrepos
   - pbsrestores
   - pbsschedules
   verbs:
@@ -23,7 +23,7 @@ rules:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups/finalizers
-  - pbsrepoes/finalizers
+  - pbsrepos/finalizers
   - pbsrestores/finalizers
   - pbsschedules/finalizers
   verbs:
@@ -32,7 +32,7 @@ rules:
   - pbs.pbs.sharifmind.ir
   resources:
   - pbsbackups/status
-  - pbsrepoes/status
+  - pbsrepos/status
   - pbsrestores/status
   - pbsschedules/status
   verbs:

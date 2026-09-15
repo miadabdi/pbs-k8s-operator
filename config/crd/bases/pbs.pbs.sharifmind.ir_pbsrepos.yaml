@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.22.0
-  name: pbsrepoes.pbs.pbs.sharifmind.ir
+  name: pbsrepos.pbs.pbs.sharifmind.ir
 spec:
   group: pbs.pbs.sharifmind.ir
   names:
     kind: PBSRepo
     listKind: PBSRepoList
-    plural: pbsrepoes
+    plural: pbsrepos
     singular: pbsrepo
   scope: Cluster
   versions:
   - name: v1
     schema:
       openAPIV3Schema:
-        description: PBSRepo is the Schema for the pbsrepoes API
+        description: PBSRepo is the Schema for the pbsrepos API
         properties:
           apiVersion:
             description: |-

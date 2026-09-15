@@ -16,7 +16,7 @@ rules:
 - apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
-  - pbsrepoes
+  - pbsrepos
   verbs:
   - get
   - list
@@ -24,6 +24,6 @@ rules:
 - apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
-  - pbsrepoes/status
+  - pbsrepos/status
   verbs:
   - get

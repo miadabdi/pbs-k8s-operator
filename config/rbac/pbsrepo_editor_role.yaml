@@ -16,7 +16,7 @@ rules:
 - apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
-  - pbsrepoes
+  - pbsrepos
   verbs:
   - create
   - delete
@@ -28,6 +28,6 @@ rules:
 - apiGroups:
   - pbs.pbs.sharifmind.ir
   resources:
-  - pbsrepoes/status
+  - pbsrepos/status
   verbs:
   - get

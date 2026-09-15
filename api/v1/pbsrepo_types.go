@@ -61,9 +61,9 @@ type PBSRepoStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:path=pbsrepos,scope=Cluster
 
-// PBSRepo is the Schema for the pbsrepoes API
+// PBSRepo is the Schema for the pbsrepos API
 type PBSRepo struct {
 	metav1.TypeMeta `json:",inline"`
 
