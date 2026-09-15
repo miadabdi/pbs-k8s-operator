@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= pbs-operator:dev
+# Image URL of the backup/restore agent image (built from Dockerfile.agent)
+AGENT_IMG ?= pbs-agent:dev
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -87,7 +89,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -124,6 +126,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t ${IMG} .
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t ${AGENT_IMG} -f Dockerfile.agent .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -151,6 +154,36 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+
+##@ Test environment
+
+# The Vagrant-based test environment lives in testenv/ (scaffolded by a later
+# task). load-image transfers the built images into both VMs via ctr.
+NODES ?= k8s-ctl1 k8s-node1
+
+.PHONY: load-image
+load-image: ## Save images to testenv/.image-cache and import them into the Vagrant k8s nodes.
+	@mkdir -p testenv/.image-cache
+	$(CONTAINER_TOOL) save $(IMG) -o testenv/.image-cache/pbs-operator.tar
+	$(CONTAINER_TOOL) save $(AGENT_IMG) -o testenv/.image-cache/pbs-agent.tar
+	@for node in $(NODES); do \
+		for image in pbs-operator pbs-agent; do \
+			echo "Importing $$image into $$node"; \
+			vagrant ssh $$node -c 'sudo ctr -n k8s.io images import /vagrant/.image-cache/'$$image'.tar'; \
+		done \
+	done
+
+.PHONY: e2e-live
+e2e-live: ## Run e2e tests against the live testenv cluster (run testenv-up first).
+	KUBECONFIG=testenv/artifacts/admin.conf go test -tags=e2e ./test/e2e/...
+
+.PHONY: testenv-up
+testenv-up: ## Bring up the Vagrant-based test environment (testenv/scripts/up.sh).
+	./testenv/scripts/up.sh
+
+.PHONY: testenv-down
+testenv-down: ## Destroy the Vagrant-based test environment.
+	vagrant destroy -f
 
 ##@ Deployment
 

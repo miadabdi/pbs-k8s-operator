@@ -28,3 +28,13 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# pbs-operator: test environment secrets, VM artifacts and image cache
+testenv/secrets/
+testenv/artifacts/
+testenv/vendor/
+testenv/.image-cache/
+testenv/.vagrant/
+
+# SDD planning artifacts
+.superpowers/

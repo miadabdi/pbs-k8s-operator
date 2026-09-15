@@ -1,5 +1,3 @@
-//go:build e2e
-
 /*
 Copyright 2026.
 
@@ -16,10 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package e2e holds live end-to-end tests run against the testenv Vagrant
+// cluster via `make e2e-live`. Tests are behind the `e2e` build tag so they
+// are excluded from normal unit-test runs. This file keeps the package
+// buildable even when the tag is not set.
 package e2e
-
-import "testing"
-
-// TestPlaceholder keeps `make e2e-live` green until real e2e tests land
-// (later milestones).
-func TestPlaceholder(t *testing.T) {}
