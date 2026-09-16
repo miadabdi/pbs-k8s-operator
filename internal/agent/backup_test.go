@@ -106,7 +106,7 @@ func TestClientEnv(t *testing.T) {
 
 // Bullet 2: client argv construction — --ns, --keyfile, ordered pxar pairs.
 func TestBackupArgv(t *testing.T) {
-	got := backupArgv("tenant1", "/tmp/kf.json", []string{"data-a", "zdata"})
+	got := backupArgv("tenant1", "/tmp/kf.json", []string{"data-a", "zdata"}, "")
 	want := []string{
 		"proxmox-backup-client", "backup",
 		"--ns", "tenant1",
@@ -116,6 +116,32 @@ func TestBackupArgv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("backupArgv() = %q\nwant %q", got, want)
+	}
+}
+
+// The --api dir appends one api.pxar pair AFTER the pvc pairs.
+func TestBackupArgvAPI(t *testing.T) {
+	got := backupArgv("tenant1", "/tmp/kf.json", []string{"data-a"}, "/staging/api")
+	want := []string{
+		"proxmox-backup-client", "backup",
+		"--ns", "tenant1",
+		"--keyfile", "/tmp/kf.json",
+		"pvc-data-a.pxar:/backup/data-a",
+		"api.pxar:/staging/api",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("backupArgv() = %q\nwant %q", got, want)
+	}
+	// API-only backup (no PVCs): the api pair alone.
+	got = backupArgv("tenant1", "/tmp/kf.json", nil, "/staging/api")
+	want = []string{
+		"proxmox-backup-client", "backup",
+		"--ns", "tenant1",
+		"--keyfile", "/tmp/kf.json",
+		"api.pxar:/staging/api",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("api-only backupArgv() = %q\nwant %q", got, want)
 	}
 }
 
@@ -181,12 +207,12 @@ func TestRunBackupSuccess(t *testing.T) {
 	d := deps(fr.run)
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a", "zdata"}, termlog)
+	code := RunBackup(d, []string{"data-a", "zdata"}, "", termlog)
 	if code != 0 {
 		t.Fatalf("RunBackup exit = %d, want 0", code)
 	}
 	// argv[0][5] is the --keyfile value (temp path, different each run).
-	wantBackup := backupArgv("tenant1", fr.argv[0][5], []string{"data-a", "zdata"})
+	wantBackup := backupArgv("tenant1", fr.argv[0][5], []string{"data-a", "zdata"}, "")
 	if !reflect.DeepEqual(fr.argv[0], wantBackup) {
 		t.Errorf("backup argv = %q\nwant %q", fr.argv[0], wantBackup)
 	}
@@ -224,7 +250,7 @@ func TestRunBackupClientFailure(t *testing.T) {
 	d := deps(fr.run)
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a"}, termlog)
+	code := RunBackup(d, []string{"data-a"}, "", termlog)
 	if code != 1 {
 		t.Fatalf("RunBackup exit = %d, want 1 (fallback)", code)
 	}
@@ -247,7 +273,7 @@ func TestRunBackupMissingEnv(t *testing.T) {
 	d.Getenv = testEnv("PBS_TOKEN_SECRET", "PBS_KEYFILE")
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a"}, termlog)
+	code := RunBackup(d, []string{"data-a"}, "", termlog)
 	if code != 2 {
 		t.Fatalf("RunBackup exit = %d, want 2", code)
 	}
@@ -260,6 +286,29 @@ func TestRunBackupMissingEnv(t *testing.T) {
 	}
 	if len(fr.argv) != 0 {
 		t.Errorf("client invoked %d times, want 0", len(fr.argv))
+	}
+}
+
+// M2: --api flows through the whole run — the backup argv gains the
+// api.pxar pair, everything else (list, termlog) unchanged.
+func TestRunBackupWithAPI(t *testing.T) {
+	fr := &fakeRunner{calls: []struct {
+		err    error
+		stdout string
+		stderr string
+	}{
+		{},                            // backup
+		{stdout: snapshotListFixture}, // snapshot list
+	}}
+	termlog := filepath.Join(t.TempDir(), "termlog.json")
+
+	code := RunBackup(deps(fr.run), nil, "/staging/api", termlog)
+	if code != 0 {
+		t.Fatalf("RunBackup exit = %d, want 0", code)
+	}
+	wantBackup := backupArgv("tenant1", fr.argv[0][5], nil, "/staging/api")
+	if !reflect.DeepEqual(fr.argv[0], wantBackup) {
+		t.Errorf("backup argv = %q\nwant %q", fr.argv[0], wantBackup)
 	}
 }
 
@@ -291,19 +340,40 @@ func TestMaterializeKeyfile(t *testing.T) {
 
 func TestParseBackupArgs(t *testing.T) {
 	t.Run("pvc order preserved, TERMLOG default", func(t *testing.T) {
-		pvcs, termlog, err := ParseBackupArgs([]string{"--pvc", "b", "--pvc", "a"}, func(string) string { return "" })
+		pvcs, api, termlog, err := ParseBackupArgs([]string{"--pvc", "b", "--pvc", "a"}, func(string) string { return "" })
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(pvcs, []string{"b", "a"}) {
 			t.Errorf("pvcs = %q", pvcs)
 		}
+		if api != "" {
+			t.Errorf("api = %q, want empty", api)
+		}
 		if termlog != "/dev/termination-log" {
 			t.Errorf("termlog = %q, want default", termlog)
 		}
 	})
+	t.Run("--api with pvcs", func(t *testing.T) {
+		pvcs, api, _, err := ParseBackupArgs([]string{"--pvc", "a", "--api", "/staging/api"}, func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(pvcs, []string{"a"}) || api != "/staging/api" {
+			t.Errorf("pvcs = %q api = %q", pvcs, api)
+		}
+	})
+	t.Run("--api alone (API-only backup)", func(t *testing.T) {
+		pvcs, api, _, err := ParseBackupArgs([]string{"--api", "/staging/api"}, func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pvcs) != 0 || api != "/staging/api" {
+			t.Errorf("pvcs = %q api = %q, want no pvcs and /staging/api", pvcs, api)
+		}
+	})
 	t.Run("TERMLOG env override honored", func(t *testing.T) {
-		_, termlog, err := ParseBackupArgs([]string{"--pvc", "a"}, func(k string) string {
+		_, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a"}, func(k string) string {
 			if k == "TERMLOG" {
 				return "/tmp/custom-termlog"
 			}
@@ -317,7 +387,7 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("--termlog flag beats env", func(t *testing.T) {
-		_, termlog, err := ParseBackupArgs([]string{"--pvc", "a", "--termlog", "/x"}, func(k string) string {
+		_, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a", "--termlog", "/x"}, func(k string) string {
 			if k == "TERMLOG" {
 				return "/from-env"
 			}
@@ -330,9 +400,9 @@ func TestParseBackupArgs(t *testing.T) {
 			t.Errorf("termlog = %q, want /x", termlog)
 		}
 	})
-	t.Run("no --pvc is an error", func(t *testing.T) {
-		if _, _, err := ParseBackupArgs(nil, func(string) string { return "" }); err == nil {
-			t.Error("expected error for missing --pvc")
+	t.Run("no --pvc and no --api is an error", func(t *testing.T) {
+		if _, _, _, err := ParseBackupArgs(nil, func(string) string { return "" }); err == nil {
+			t.Error("expected error for missing --pvc and --api")
 		}
 	})
 }

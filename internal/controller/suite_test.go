@@ -25,6 +25,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
+	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -40,11 +43,12 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	ctx       context.Context
-	cancel    context.CancelFunc
-	testEnv   *envtest.Environment
-	cfg       *rest.Config
-	k8sClient client.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	testEnv    *envtest.Environment
+	cfg        *rest.Config
+	k8sClient  client.Client
+	serializer *backuplib.Serializer // M2: wired into every backup reconcile
 )
 
 func TestControllers(t *testing.T) {
@@ -83,6 +87,13 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// M2: the serializer's dynamic + discovery clients, mirroring cmd/main.go.
+	dyn, err := dynamic.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	disco, err := discovery.NewDiscoveryClientForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	serializer = backuplib.NewSerializer(dyn, disco)
 })
 
 var _ = AfterSuite(func() {

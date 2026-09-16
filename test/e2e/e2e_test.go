@@ -29,6 +29,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -421,9 +422,10 @@ func podLogs(t *testing.T, ns, jobName string) string {
 }
 
 // verifySnapshotOnPBS runs a one-off Job on the pbs-agent image executing
-// `proxmox-backup-client snapshot list` with env from the repo secret and
-// asserts the group/ref from snapshotRef is present in PBS.
-func verifySnapshotOnPBS(t *testing.T, jobName, snapshotRef string) {
+// `proxmox-backup-client snapshot list` with env from the repo secret,
+// asserts the group/ref from snapshotRef is present in PBS, and returns the
+// snapshot's file list (api.pxar.didx, pvc-*.pxar.didx, ...).
+func verifySnapshotOnPBS(t *testing.T, jobName, snapshotRef string) []string {
 	t.Helper()
 	ensureE2ENS(t)
 	parts := strings.SplitN(snapshotRef, "/", 3)
@@ -435,7 +437,56 @@ func verifySnapshotOnPBS(t *testing.T, jobName, snapshotRef string) {
 		t.Fatalf("snapshotRef %q timestamp: %v", snapshotRef, err)
 	}
 
-	name := fmt.Sprintf("e2e-verify-%d", runID)
+	out := runVerifyJob(t, "list", "proxmox-backup-client snapshot list --ns "+
+		liveRepo.Spec.Namespace+" --output-format json")
+	var snaps []pbs.Snapshot
+	if err := json.Unmarshal([]byte(out), &snaps); err != nil {
+		t.Fatalf("parse snapshot list %q: %v", out, err)
+	}
+	for _, s := range snaps {
+		if s.BackupType == "host" && s.BackupID == jobName {
+			if d := s.BackupTime - float64(wantTime.Unix()); d < -120 || d > 120 {
+				t.Fatalf("snapshot %s/%s backup-time %v is >2m from ref time %s", s.BackupType, s.BackupID, s.BackupTime, parts[2])
+			}
+			return snapshotFilesOnPBS(t, snapshotRef)
+		}
+	}
+	t.Fatalf("no PBS snapshot host/%s found in %d snapshots for %s", jobName, len(snaps), liveRepo.Spec.Namespace)
+	return nil
+}
+
+// snapshotFilesOnPBS returns the archive file names of one snapshot
+// (api.pxar.didx, pvc-<name>.pxar.didx, ...) via `snapshot files <ref>`.
+func snapshotFilesOnPBS(t *testing.T, snapshotRef string) []string {
+	t.Helper()
+	out := runVerifyJob(t, "files", "proxmox-backup-client snapshot files "+snapshotRef+
+		" --ns "+liveRepo.Spec.Namespace+" --output-format json")
+	var files []struct {
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal([]byte(out), &files); err != nil {
+		t.Fatalf("parse snapshot files %q: %v", out, err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("snapshot %s lists no files", snapshotRef)
+	}
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Filename)
+	}
+	return names
+}
+
+// verifySeq disambiguates verify Jobs within one run: every invocation gets
+// its own Job (async cleanup may leave the previous one terminating).
+var verifySeq atomic.Uint64
+
+// runVerifyJob runs one one-off verify Job executing clientCmd (a
+// proxmox-backup-client invocation) with env from the repo secret and returns
+// its stdout trimmed to the JSON array the CLI prints (stderr junk stripped).
+func runVerifyJob(t *testing.T, kind, clientCmd string) string {
+	t.Helper()
+	name := fmt.Sprintf("e2e-verify-%s-%d-%d", kind, runID, verifySeq.Add(1))
 	port := liveRepo.Spec.Port
 	if port == 0 {
 		port = 8007
@@ -452,8 +503,7 @@ func verifySnapshotOnPBS(t *testing.T, jobName, snapshotRef string) {
 						Name:            "verify",
 						Image:           agentImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Command: []string{"sh", "-c",
-							"proxmox-backup-client snapshot list --ns " + liveRepo.Spec.Namespace + " --output-format json"},
+						Command:         []string{"sh", "-c", clientCmd},
 						Env: []corev1.EnvVar{
 							{Name: "PBS_REPOSITORY", Value: fmt.Sprintf("%s@%s:%d:%s",
 								creds.tokenID, liveRepo.Spec.Host, port, liveRepo.Spec.Datastore)},
@@ -477,19 +527,7 @@ func verifySnapshotOnPBS(t *testing.T, jobName, snapshotRef string) {
 	if lo < 0 || hi < lo {
 		t.Fatalf("verify job output has no JSON array: %s", out)
 	}
-	var snaps []pbs.Snapshot
-	if err := json.Unmarshal([]byte(out[lo:hi+1]), &snaps); err != nil {
-		t.Fatalf("parse snapshot list %q: %v", out[lo:hi+1], err)
-	}
-	for _, s := range snaps {
-		if s.BackupType == "host" && s.BackupID == jobName {
-			if d := s.BackupTime - float64(wantTime.Unix()); d < -120 || d > 120 {
-				t.Fatalf("snapshot %s/%s backup-time %v is >2m from ref time %s", s.BackupType, s.BackupID, s.BackupTime, parts[2])
-			}
-			return // found
-		}
-	}
-	t.Fatalf("no PBS snapshot host/%s found in %d snapshots for %s", jobName, len(snaps), liveRepo.Spec.Namespace)
+	return out[lo : hi+1]
 }
 
 // newUnboundPVC creates a local-path PVC that never binds (the storage class

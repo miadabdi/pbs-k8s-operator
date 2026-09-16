@@ -27,6 +27,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -36,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
+	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
 	"gitlab.sharifmind.ir/miad/pbs-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
@@ -193,11 +196,24 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsrepo")
 		os.Exit(1)
 	}
+	// M2: dynamic + discovery clients back the backup reconciler's namespace
+	// serializer (api.pxar staging).
+	dynClient, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create dynamic client")
+		os.Exit(1)
+	}
+	discoClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create discovery client")
+		os.Exit(1)
+	}
 	if err := (&controller.PBSBackupReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		Recorder:   mgr.GetEventRecorderFor("pbsbackup"),
 		AgentImage: agentImage,
+		Serializer: backuplib.NewSerializer(dynClient, discoClient),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsbackup")
 		os.Exit(1)

@@ -33,7 +33,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "backup":
-		pvcs, termlog, err := agent.ParseBackupArgs(os.Args[2:], os.Getenv)
+		pvcs, apiDir, termlog, err := agent.ParseBackupArgs(os.Args[2:], os.Getenv)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "pbs-agent:", err)
 			os.Exit(2)
@@ -45,7 +45,7 @@ func main() {
 			Stdout:   os.Stdout,
 			Stderr:   os.Stderr,
 			Run:      agent.ExecClient,
-		}, pvcs, termlog))
+		}, pvcs, apiDir, termlog))
 	case "restore":
 		fmt.Fprintln(os.Stderr, "pbs-agent restore: not implemented")
 		os.Exit(2)

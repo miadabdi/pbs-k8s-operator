@@ -41,18 +41,22 @@ func TestBuildBackupJob(t *testing.T) {
 	if got := job.Labels["pbsbackup"]; got != fullSpec.Name {
 		t.Errorf("label pbsbackup = %q, want %q", got, fullSpec.Name)
 	}
-	if len(job.Labels) != 2 {
-		t.Errorf("job has %d labels, want exactly 2: %v", len(job.Labels), job.Labels)
+	if len(job.Labels) != 3 {
+		t.Errorf("job has %d labels, want exactly 3: %v", len(job.Labels), job.Labels)
 	}
 
 	// Template carries the same labels: the controller locates the Job's pod
-	// via pbsbackup to read its termination log.
+	// via pbsbackup to read its termination log; the managed label keeps the
+	// pod out of api.yaml.
 	tl := job.Spec.Template.Labels
 	if tl["app.kubernetes.io/managed-by"] != "pbs-operator" || tl["pbsbackup"] != fullSpec.Name {
 		t.Errorf("template labels = %v, want managed-by=pbs-operator and pbsbackup=%q", tl, fullSpec.Name)
 	}
-	if len(tl) != 2 {
-		t.Errorf("template has %d labels, want exactly 2: %v", len(tl), tl)
+	if tl[ManagedLabel] != "true" {
+		t.Errorf("template labels = %v, want %s=true (serializer exclusion)", tl, ManagedLabel)
+	}
+	if len(tl) != 3 {
+		t.Errorf("template has %d labels, want exactly 3: %v", len(tl), tl)
 	}
 
 	spec := job.Spec.Template.Spec
@@ -170,5 +174,60 @@ func TestBuildBackupJobServiceAccount(t *testing.T) {
 	job := BuildBackupJob(s)
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "pbs-backup" {
 		t.Errorf("serviceAccountName = %q, want pbs-backup", got)
+	}
+}
+
+// StagingConfigMap adds the api-staging volume/mount and the --api pair; the
+// pvc volumes/mounts and --pvc pairs stay untouched.
+func TestBuildBackupJobStaging(t *testing.T) {
+	s := fullSpec
+	s.StagingConfigMap = "pg-backup-api"
+	job := BuildBackupJob(s)
+
+	c := job.Spec.Template.Spec.Containers[0]
+	// Command: pvc pairs first, then --api /staging/api.
+	wantCmd := []string{"pbs-agent", "backup", "--pvc", "pg-data", "--pvc", "pg-wal", "--api", "/staging/api"}
+	if fmt.Sprint(c.Command) != fmt.Sprint(wantCmd) {
+		t.Errorf("command = %v, want %v", c.Command, wantCmd)
+	}
+
+	// Volumes: pvcs then the staging ConfigMap volume.
+	vols := job.Spec.Template.Spec.Volumes
+	if len(vols) != 3 {
+		t.Fatalf("got %d volumes, want 3 (2 pvc + api-staging)", len(vols))
+	}
+	cmVol := vols[2]
+	if cmVol.Name != "api-staging" || cmVol.ConfigMap == nil || cmVol.ConfigMap.Name != "pg-backup-api" {
+		t.Errorf("staging volume = %+v, want api-staging ConfigMap pg-backup-api", cmVol)
+	}
+
+	// Mounts: pvc mounts then /staging/api, ReadOnly.
+	if len(c.VolumeMounts) != 3 {
+		t.Fatalf("got %d mounts, want 3", len(c.VolumeMounts))
+	}
+	m := c.VolumeMounts[2]
+	if m.Name != "api-staging" || m.MountPath != "/staging/api" || !m.ReadOnly {
+		t.Errorf("staging mount = %+v, want api-staging at /staging/api ReadOnly", m)
+	}
+}
+
+// API-only backup: no PVCs, staging only — one volume, one mount, --api alone.
+func TestBuildBackupJobStagingOnly(t *testing.T) {
+	job := BuildBackupJob(BackupJobSpec{
+		Name: "bk-api", Namespace: "app", Node: "k8s-node1",
+		RepoSecret: "pbsrepo-testenv", StagingConfigMap: "bk-api-staging",
+		Image: "pbs-agent:dev",
+	})
+
+	c := job.Spec.Template.Spec.Containers[0]
+	wantCmd := []string{"pbs-agent", "backup", "--api", "/staging/api"}
+	if fmt.Sprint(c.Command) != fmt.Sprint(wantCmd) {
+		t.Errorf("command = %v, want %v", c.Command, wantCmd)
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 1 || job.Spec.Template.Spec.Volumes[0].Name != "api-staging" {
+		t.Errorf("volumes = %+v, want only api-staging", job.Spec.Template.Spec.Volumes)
+	}
+	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/staging/api" {
+		t.Errorf("mounts = %+v, want only /staging/api", c.VolumeMounts)
 	}
 }

@@ -62,11 +62,15 @@ func clientEnv(c config) []string {
 }
 
 // backupArgv builds the backup command: one pxar pair per PVC, order preserved
-// (the Job passes --pvc args in mount order).
-func backupArgv(ns, keyfilePath string, pvcs []string) []string {
+// (the Job passes --pvc args in mount order), then the api.pxar pair for the
+// serialized API objects when apiDir is set (the --api staging mount).
+func backupArgv(ns, keyfilePath string, pvcs []string, apiDir string) []string {
 	argv := []string{clientBinary, "backup", "--ns", ns, "--keyfile", keyfilePath}
 	for _, pvc := range pvcs {
 		argv = append(argv, fmt.Sprintf("pvc-%s.pxar:/backup/%s", pvc, pvc))
+	}
+	if apiDir != "" {
+		argv = append(argv, "api.pxar:"+apiDir)
 	}
 	return argv
 }
@@ -101,7 +105,8 @@ type BackupDeps struct {
 // RunBackup performs the backup flow (steps 1-7 of the task contract) and
 // returns the process exit code. The client binary's stdout/stderr stream
 // through to ours; the termination log receives the controller contract JSON.
-func RunBackup(d BackupDeps, pvcs []string, termlogPath string) int {
+// apiDir (the --api staging mount) adds the api.pxar pair; empty skips it.
+func RunBackup(d BackupDeps, pvcs []string, apiDir, termlogPath string) int {
 	// fail reports an error via the termlog error JSON and our stderr.
 	fail := func(code int, format string, args ...any) int {
 		msg := fmt.Sprintf(format, args...)
@@ -130,7 +135,7 @@ func RunBackup(d BackupDeps, pvcs []string, termlogPath string) int {
 	// teeing stderr for the error report.
 	var errBuf bytes.Buffer
 	tee := io.MultiWriter(d.Stderr, &errBuf)
-	if err := d.Run(backupArgv(c.NS, keyPath, pvcs), env, d.Stdout, tee); err != nil {
+	if err := d.Run(backupArgv(c.NS, keyPath, pvcs, apiDir), env, d.Stdout, tee); err != nil {
 		return fail(exitCode(err), "%s", firstLine(errBuf.String()))
 	}
 
@@ -253,9 +258,11 @@ func firstLine(s string) string {
 	return s
 }
 
-// ParseBackupArgs parses `backup --pvc <name> [--pvc <name>...] [--termlog <path>]`.
-// The termlog path defaults to $TERMLOG, then /dev/termination-log.
-func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, termlog string, err error) {
+// ParseBackupArgs parses `backup --pvc <name> [--pvc <name>...] [--api <dir>]
+// [--termlog <path>]`. The termlog path defaults to $TERMLOG, then
+// /dev/termination-log. At least one --pvc or an --api dir is required
+// (API-only backups have no PVCs).
+func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, apiDir, termlog string, err error) {
 	termlog = strings.TrimSpace(getenv("TERMLOG"))
 	if termlog == "" {
 		termlog = "/dev/termination-log"
@@ -263,17 +270,18 @@ func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, 
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Var(&pvcFlag{&pvcs}, "pvc", "PVC name (repeatable; mounted at /backup/<name>)")
+	fs.StringVar(&apiDir, "api", "", "directory with the serialized API objects (staging ConfigMap mount)")
 	fs.StringVar(&termlog, "termlog", termlog, "termination log path")
 	if err := fs.Parse(args); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	if len(pvcs) == 0 {
-		return nil, "", errors.New("backup: at least one --pvc is required")
+	if len(pvcs) == 0 && apiDir == "" {
+		return nil, "", "", errors.New("backup: at least one --pvc or --api is required")
 	}
 	if fs.NArg() > 0 {
-		return nil, "", fmt.Errorf("backup: unexpected arguments: %s", strings.Join(fs.Args(), " "))
+		return nil, "", "", fmt.Errorf("backup: unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	return pvcs, termlog, nil
+	return pvcs, apiDir, termlog, nil
 }
 
 // pvcFlag collects repeated --pvc values.

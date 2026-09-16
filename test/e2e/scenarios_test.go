@@ -97,6 +97,33 @@ func TestBackupRerun(t *testing.T) {
 	}
 }
 
+// Scenario 3b (M2 GATE): the same pg-namespace backup now also serializes the
+// namespace's API objects — the snapshot's file list must contain api.pxar.didx
+// alongside the pvc-*.pxar.didx data archives (one snapshot, both payloads).
+func TestBackupWithAPISerialization(t *testing.T) {
+	requireEnv(t)
+	name := fmt.Sprintf("pg-e2e-api-%d", runID)
+	newBackup(t, pgNS, name, repoName, nil)
+	b := assertHappyBackup(t, pgNS, name, pgNode, true)
+
+	files := snapshotFilesOnPBS(t, b.Status.SnapshotRef)
+	hasAPI, hasPVC := false, false
+	for _, f := range files {
+		if f == "api.pxar.didx" {
+			hasAPI = true
+		}
+		if strings.HasPrefix(f, "pvc-") && strings.HasSuffix(f, ".pxar.didx") {
+			hasPVC = true
+		}
+	}
+	if !hasAPI {
+		t.Fatalf("snapshot %s files %v lack api.pxar.didx", b.Status.SnapshotRef, files)
+	}
+	if !hasPVC {
+		t.Fatalf("snapshot %s files %v lack any pvc-*.pxar.didx (data and API must share the snapshot)", b.Status.SnapshotRef, files)
+	}
+}
+
 // Scenario 4: PBSRepo with one flipped hex pair in the fingerprint goes
 // Ready=False/Unreachable, and a PBSBackup referencing it holds in Scheduled
 // with no Job created.

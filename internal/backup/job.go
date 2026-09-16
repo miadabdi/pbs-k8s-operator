@@ -11,13 +11,14 @@ import (
 
 // BackupJobSpec carries everything needed to build a backup Job.
 type BackupJobSpec struct {
-	Name           string // PBSBackup CR name; also pod hostname → PBS backup-id
-	Namespace      string // PBSBackup CR namespace
-	Node           string // from ResolveNode
-	RepoSecret     string // name of the PBSRepo secret (testenv contract keys)
-	PVCs           []string
-	Image          string
-	ServiceAccount string // optional; empty → default
+	Name             string // PBSBackup CR name; also pod hostname → PBS backup-id
+	Namespace        string // PBSBackup CR namespace
+	Node             string // from ResolveNode
+	RepoSecret       string // name of the PBSRepo secret (testenv contract keys)
+	PVCs             []string
+	StagingConfigMap string // optional: ConfigMap with api.yaml → api.pxar (M2)
+	Image            string
+	ServiceAccount   string // optional; empty → default
 }
 
 // envContract is the exact testenv PBSRepo secret key set: env var -> secret key.
@@ -41,24 +42,40 @@ var envContract = []struct{ env, key string }{
 //     derives backup-id from hostname
 //   - restartPolicy: Never; backoffLimit: 0; ttlSecondsAfterFinished: 3600
 //   - one volume per PVC (name pvc-<i>), mounted ReadOnly at /backup/<pvc-name>
+//   - when StagingConfigMap is set: volume api-staging (ConfigMap source)
+//     mounted ReadOnly at /staging/api, and "--api /staging/api" appended to
+//     the command (the agent adds the api.pxar pair)
 //   - env (from RepoSecret keys — EXACT testenv contract, via secretKeyRef;
 //     the Job does NOT inline secret data)
 //   - container command: ["pbs-agent","backup","--pvc","<pvc1>","--pvc","<pvc2>",...]
 //     (agent resolves /backup/<pvc> mounts; arg contract for the agent task)
 //   - imagePullPolicy: IfNotPresent
 func BuildBackupJob(spec BackupJobSpec) *batchv1.Job {
-	volumes := make([]corev1.Volume, len(spec.PVCs))
-	mounts := make([]corev1.VolumeMount, len(spec.PVCs))
+	volumes := make([]corev1.Volume, 0, len(spec.PVCs)+1)
+	mounts := make([]corev1.VolumeMount, 0, len(spec.PVCs)+1)
 	command := []string{"pbs-agent", "backup"}
 	for i, pvc := range spec.PVCs {
-		volumes[i] = corev1.Volume{
-			Name: fmt.Sprintf("pvc-%d", i),
+		name := fmt.Sprintf("pvc-%d", i)
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc, ReadOnly: true},
 			},
-		}
-		mounts[i] = corev1.VolumeMount{Name: volumes[i].Name, MountPath: "/backup/" + pvc, ReadOnly: true}
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: name, MountPath: "/backup/" + pvc, ReadOnly: true})
 		command = append(command, "--pvc", pvc)
+	}
+	if spec.StagingConfigMap != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "api-staging",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: spec.StagingConfigMap},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: "api-staging", MountPath: "/staging/api", ReadOnly: true})
+		command = append(command, "--api", "/staging/api")
 	}
 
 	env := make([]corev1.EnvVar, len(envContract))
@@ -77,6 +94,9 @@ func BuildBackupJob(spec BackupJobSpec) *batchv1.Job {
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "pbs-operator",
 		"pbsbackup":                    spec.Name,
+		// The serializer skips managed-labeled objects, so re-reconciles never
+		// fold the backup's own pod into api.yaml.
+		ManagedLabel: "true",
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
+	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
 )
 
 // ---- fixtures -----------------------------------------------------------
@@ -188,12 +190,35 @@ func reconcileBackup(ctx context.Context, ns, name string, rec record.EventRecor
 		Scheme:     k8sClient.Scheme(),
 		Recorder:   rec,
 		AgentImage: "pbs-agent:dev",
+		Serializer: serializer,
 	}
 	res, err := r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	return res
+}
+
+// makeNamespace creates an empty namespace (serialization specs need one with
+// known contents; "default" accumulates fixtures from every earlier spec).
+func makeNamespace(ctx context.Context, name string) {
+	err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	Expect(err).NotTo(HaveOccurred(), "create namespace "+name)
+}
+
+// makeNode creates a Node object (envtest ships none) so node-pinned Jobs
+// have something to be pinned to.
+func makeNode(ctx context.Context, name string) {
+	err := k8sClient.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	Expect(err).NotTo(HaveOccurred(), "create node "+name)
+}
+
+// makeSeedConfigMap seeds a ConfigMap so serialization has known content.
+func makeSeedConfigMap(ctx context.Context, name, ns string) {
+	Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data:       map[string]string{"seed": "true"},
+	})).To(Succeed())
 }
 
 // backupJobs lists the Jobs controller-owned by the backup (any namespace
@@ -405,9 +430,12 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(env["PBS_TOKEN_SECRET"].ValueFrom.SecretKeyRef.Key).To(Equal("tokenSecret"))
 		c := job.Spec.Template.Spec.Containers[0]
 		Expect(c.Image).To(Equal("pbs-agent:dev"))
-		Expect(c.VolumeMounts).To(HaveLen(1))
+		// PVC mount + the api-staging mount (M2: every backup serializes).
+		Expect(c.VolumeMounts).To(HaveLen(2))
 		Expect(c.VolumeMounts[0].MountPath).To(Equal("/backup/bk-2-data"))
 		Expect(c.VolumeMounts[0].ReadOnly).To(BeTrue())
+		Expect(c.VolumeMounts[1].MountPath).To(Equal("/staging/api"))
+		Expect(c.VolumeMounts[1].ReadOnly).To(BeTrue())
 
 		cond := meta.FindStatusCondition(b.Status.Conditions, "Ready")
 		Expect(cond.Reason).To(Equal("Running"))
@@ -501,7 +529,9 @@ var _ = Describe("PBSBackup Controller", func() {
 		claims := func(j *batchv1.Job) []string {
 			var out []string
 			for _, v := range j.Spec.Template.Spec.Volumes {
-				out = append(out, v.PersistentVolumeClaim.ClaimName)
+				if v.PersistentVolumeClaim != nil { // skip the api-staging volume
+					out = append(out, v.PersistentVolumeClaim.ClaimName)
+				}
 			}
 			return out
 		}
@@ -578,10 +608,13 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(drainEvents(rec)).To(BeEmpty())
 	})
 
-	It("extra. zero PVCs selected → stays Scheduled, event, requeue 5m", func() {
+	// M2 rule: the gate holds only when BOTH no PVCs are selected AND the
+	// namespace serializes to nothing (an empty namespace has no API objects).
+	It("extra. zero PVCs and nothing to serialize → stays Scheduled, event, requeue 5m", func() {
+		makeNamespace(ctx, "bk-8")
 		makeReadyRepo(ctx, "bk-8-repo")
 		b := &pbsv1.PBSBackup{
-			ObjectMeta: metav1.ObjectMeta{Name: "bk-8", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "bk-8", Namespace: "bk-8"},
 			Spec: pbsv1.PBSBackupSpec{
 				RepoRef:  "bk-8-repo",
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "no-such-app"}},
@@ -590,10 +623,10 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(k8sClient.Create(ctx, b)).To(Succeed())
 
 		rec := record.NewFakeRecorder(16)
-		res := reconcileBackup(ctx, "default", "bk-8", rec)
+		res := reconcileBackup(ctx, "bk-8", "bk-8", rec)
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
-		fetched := fetchBackup(ctx, "default", "bk-8")
+		fetched := fetchBackup(ctx, "bk-8", "bk-8")
 		Expect(fetched.Status.Phase).To(Equal(pbsv1.BackupPhaseScheduled))
 		Expect(drainEvents(rec)).To(HaveLen(1))
 		Expect(backupJobs(ctx, fetched)).To(BeEmpty())
@@ -639,5 +672,123 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(events[0]).To(ContainSubstring(repo.Spec.SecretRef.Name))
 		Expect(backupJobs(ctx, b)).To(BeEmpty())
 		Expect(repoSecretCopy(ctx, "default", "pbsrepo-"+repo.Name)).To(BeNil())
+	})
+
+	// M2: API serialization lands in a controller-owned staging ConfigMap the
+	// Job mounts at /staging/api (→ api.pxar).
+	It("11. staging ConfigMap: api.yaml payload, ownerRef, managed label, Job mounts /staging/api", func() {
+		makeNamespace(ctx, "bk-11")
+		createSecret(ctx, "bk-11-seed", "bk-11", map[string][]byte{"k": []byte("seed")})
+		makeSeedConfigMap(ctx, "bk-11-seed", "bk-11")
+		repo := makeReadyRepo(ctx, "bk-11-repo")
+		makeLocalPV(ctx, "bk-11-pv", "node-a")
+		makePVC(ctx, "bk-11-data", "bk-11", "bk-11-pv")
+		makeBackup(ctx, "bk-11", "bk-11", repo.Name, "bk-11-data")
+
+		rec := record.NewFakeRecorder(32)
+		reconcileBackup(ctx, "bk-11", "bk-11", rec)
+
+		b := fetchBackup(ctx, "bk-11", "bk-11")
+		staging := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "bk-11", Name: "bk-11-api"}, staging)).To(Succeed())
+		api := staging.Data["api.yaml"]
+		Expect(api).NotTo(BeEmpty())
+		// Seeds and the PVC serialize; volatile fields and own artifacts don't.
+		for _, want := range []string{"kind: Secret", "kind: ConfigMap", "kind: PersistentVolumeClaim"} {
+			Expect(api).To(ContainSubstring(want))
+		}
+		for _, absent := range []string{
+			"kind: PBSBackup", "kind: Job", "uid:", "resourceVersion:",
+			"creationTimestamp:", "managedFields:", "bk-11-repo-creds", // source secret lives in default
+		} {
+			Expect(api).NotTo(ContainSubstring(absent))
+		}
+		// OwnerRef → GC with the CR; managed label → excluded from future runs.
+		refs := staging.GetOwnerReferences()
+		Expect(refs).To(HaveLen(1))
+		Expect(refs[0].UID).To(Equal(b.UID))
+		Expect(refs[0].Controller).NotTo(BeNil())
+		Expect(*refs[0].Controller).To(BeTrue())
+		Expect(staging.Labels[backuplib.ManagedLabel]).To(Equal("true"))
+		// The copied repo secret is managed-labeled too: present, but not serialized.
+		copied := repoSecretCopy(ctx, "bk-11", "pbsrepo-"+repo.Name)
+		Expect(copied).NotTo(BeNil())
+		Expect(copied.Labels[backuplib.ManagedLabel]).To(Equal("true"))
+		Expect(api).NotTo(ContainSubstring("pbsrepo-" + repo.Name))
+
+		// The Job mounts the ConfigMap at /staging/api and passes --api.
+		jobs := backupJobs(ctx, b)
+		Expect(jobs).To(HaveLen(1))
+		job := &jobs[0]
+		var vol *corev1.Volume
+		for i := range job.Spec.Template.Spec.Volumes {
+			if job.Spec.Template.Spec.Volumes[i].Name == "api-staging" {
+				vol = &job.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		Expect(vol).NotTo(BeNil())
+		Expect(vol.ConfigMap.Name).To(Equal("bk-11-api"))
+		c := job.Spec.Template.Spec.Containers[0]
+		Expect(c.Command).To(ContainElement("--api"))
+		Expect(c.Command).To(ContainElement("/staging/api"))
+		var mount *corev1.VolumeMount
+		for i := range c.VolumeMounts {
+			if c.VolumeMounts[i].MountPath == "/staging/api" {
+				mount = &c.VolumeMounts[i]
+			}
+		}
+		Expect(mount).NotTo(BeNil())
+		Expect(mount.ReadOnly).To(BeTrue())
+
+		// Skip-if-identical: a second reconcile must not touch the ConfigMap.
+		rv := staging.ResourceVersion
+		reconcileBackup(ctx, "bk-11", "bk-11", rec)
+		again := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "bk-11", Name: "bk-11-api"}, again)).To(Succeed())
+		Expect(again.ResourceVersion).To(Equal(rv))
+	})
+
+	// M2: a backup with no PVCs but a non-empty serialization is valid — one
+	// Job on the FIRST node alphabetically (documented placement rule).
+	It("12. zero PVCs + API-only backup → one Job on the first node alphabetically", func() {
+		makeNamespace(ctx, "bk-12")
+		createSecret(ctx, "bk-12-seed", "bk-12", map[string][]byte{"k": []byte("seed")})
+		makeNode(ctx, "node-b")
+		makeNode(ctx, "node-a")
+		repo := makeReadyRepo(ctx, "bk-12-repo")
+		b := &pbsv1.PBSBackup{
+			ObjectMeta: metav1.ObjectMeta{Name: "bk-12", Namespace: "bk-12"},
+			Spec: pbsv1.PBSBackupSpec{
+				RepoRef:  repo.Name,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "no-such-app"}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, b)).To(Succeed())
+
+		rec := record.NewFakeRecorder(32)
+		res := reconcileBackup(ctx, "bk-12", "bk-12", rec)
+
+		Expect(res.RequeueAfter).To(Equal(time.Minute)) // Running poll fallback
+		fetched := fetchBackup(ctx, "bk-12", "bk-12")
+		Expect(fetched.Status.Phase).To(Equal(pbsv1.BackupPhaseRunning))
+		Expect(fetched.Status.Jobs).To(Equal([]pbsv1.BackupJobStatus{
+			{Node: "node-a", Job: "bk-12-node-a", State: "active"},
+		}))
+
+		jobs := backupJobs(ctx, fetched)
+		Expect(jobs).To(HaveLen(1))
+		job := &jobs[0]
+		Expect(job.Name).To(Equal("bk-12-node-a"))
+		sel := job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		Expect(sel.NodeSelectorTerms[0].MatchExpressions[0].Values).To(Equal([]string{"node-a"}))
+		// No PVCs to mount: only the staging volume.
+		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(1))
+		Expect(job.Spec.Template.Spec.Volumes[0].Name).To(Equal("api-staging"))
+		c := job.Spec.Template.Spec.Containers[0]
+		Expect(fmt.Sprint(c.Command)).To(Equal(fmt.Sprint([]string{"pbs-agent", "backup", "--api", "/staging/api"})))
+		// The staging ConfigMap backs the backup.
+		staging := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "bk-12", Name: "bk-12-api"}, staging)).To(Succeed())
+		Expect(staging.Data["api.yaml"]).To(ContainSubstring("kind: Secret"))
 	})
 })

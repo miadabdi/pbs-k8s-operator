@@ -67,9 +67,10 @@ const (
 )
 
 // PBSBackupReconciler reconciles a PBSBackup object: it waits for the target
-// PBSRepo to be Ready, resolves each selected PVC to the node holding its
-// data, launches one node-pinned backup Job per node, and tracks the Jobs to
-// a terminal phase.
+// PBSRepo to be Ready, serializes the namespace's API objects into a staging
+// ConfigMap (M2), resolves each selected PVC to the node holding its data,
+// launches one node-pinned backup Job per node, and tracks the Jobs to a
+// terminal phase.
 type PBSBackupReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -77,6 +78,11 @@ type PBSBackupReconciler struct {
 
 	// AgentImage is the backup agent container image (--agent-image flag).
 	AgentImage string
+
+	// Serializer snapshots the backup namespace's API objects for api.pxar.
+	// Nil disables API serialization (M1 mode: no staging ConfigMap, and the
+	// zero-PVC gate reverts to "no PVCs → hold").
+	Serializer *backuplib.Serializer
 }
 
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsbackups,verbs=get;list;watch;create;update;patch
@@ -90,6 +96,11 @@ type PBSBackupReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=create;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
+// M2: namespace API serialization reads every namespaced object type (nodes
+// list picks the API-only backup's node; covered by the wildcard).
+// +kubebuilder:rbac:groups=*,resources=*,verbs=get;list
+// The staging ConfigMap (<backup>-api) carries the serialized api.yaml.
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;create;update
 
 // Reconcile walks the phase machine New → Scheduled → Running →
 // Completed|Failed. Terminal phases no-op. See the helper docs for events,
@@ -139,8 +150,29 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if problem != "" {
 		return r.hold(ctx, &backup, reasonUnplaceable, problem, requeueWait)
 	}
-	if len(pvcs) == 0 {
-		return r.hold(ctx, &backup, reasonNoPVCs, "no PVCs selected (the workload may appear later)", requeueWaitSlow)
+
+	// 3.5 API serialization (M2): snapshot every API object in the backup's
+	// namespace into a staging ConfigMap; the Job archives it as api.pxar. An
+	// empty namespace yields no ConfigMap — the agent then skips api.pxar.
+	staging := ""
+	if r.Serializer != nil {
+		apiYAML, err := r.Serializer.SerializeNamespace(ctx, backup.Namespace)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("serialize namespace %s: %w", backup.Namespace, err)
+		}
+		if apiYAML != "" {
+			if staging, err = r.ensureStagingConfigMap(ctx, &backup, apiYAML); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	// Zero-PVC gate (M2 rule): hold only when there is nothing at all to back
+	// up — no PVCs AND an empty serialization. API-only backups are valid.
+	if len(pvcs) == 0 && staging == "" {
+		return r.hold(ctx, &backup, reasonNoPVCs,
+			"no PVCs selected and the namespace has no API objects to serialize (the workload may appear later)",
+			requeueWaitSlow)
 	}
 
 	// 4. Placement: map every PVC to a node (PV affinity, else a mounting pod).
@@ -149,6 +181,22 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	groups := map[string][]string{}
+	if len(pvcs) == 0 {
+		// API-only backup: no volume pins the Job. Run the single Job on the
+		// FIRST node alphabetically — deterministic across reconciles and
+		// restarts.
+		// ponytail: no readiness/cordon filtering; a NotReady first node
+		// stalls the backup — filter on Ready if that ever bites.
+		node, err := r.firstNode(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if node == "" {
+			return r.hold(ctx, &backup, reasonUnplaceable,
+				"no nodes found to run the API-only backup job", requeueWait)
+		}
+		groups[node] = nil
+	}
 	for i := range pvcs {
 		node, problem, err := r.placePVC(ctx, &backup, &pvcs[i], pods.Items)
 		if err != nil {
@@ -186,12 +234,13 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					requeueWait)
 			}
 			job = backuplib.BuildBackupJob(backuplib.BackupJobSpec{
-				Name:       name,
-				Namespace:  backup.Namespace,
-				Node:       node,
-				RepoSecret: repoSecret,
-				PVCs:       groups[node],
-				Image:      r.agentImage(),
+				Name:             name,
+				Namespace:        backup.Namespace,
+				Node:             node,
+				RepoSecret:       repoSecret,
+				PVCs:             groups[node],
+				StagingConfigMap: staging,
+				Image:            r.agentImage(),
 			})
 			if err := ctrl.SetControllerReference(&backup, job, r.Scheme); err != nil {
 				return ctrl.Result{}, err
@@ -279,18 +328,27 @@ func (r *PBSBackupReconciler) ensureRepoSecret(ctx context.Context, b *pbsv1.PBS
 	existing := &corev1.Secret{}
 	switch err := r.Get(ctx, types.NamespacedName{Namespace: b.Namespace, Name: name}, existing); {
 	case err == nil:
-		if contractEqual(existing.Data, data) {
+		// The managed label keeps the copy out of api.yaml (M2 serializer).
+		if contractEqual(existing.Data, data) && existing.Labels[backuplib.ManagedLabel] != "" {
 			return name, "", nil
 		}
 		existing.Data = data
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+		}
+		existing.Labels[backuplib.ManagedLabel] = "true"
 		if err := r.Update(ctx, existing); err != nil {
 			return "", "", err
 		}
 		return name, "", nil
 	case apierrors.IsNotFound(err):
 		copySec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.Namespace},
-			Data:       data,
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: b.Namespace,
+				Labels:    map[string]string{backuplib.ManagedLabel: "true"},
+			},
+			Data: data,
 		}
 		if err := ctrl.SetControllerReference(b, copySec, r.Scheme); err != nil {
 			return "", "", err
@@ -302,6 +360,65 @@ func (r *PBSBackupReconciler) ensureRepoSecret(ctx context.Context, b *pbsv1.PBS
 	default:
 		return "", "", err
 	}
+}
+
+// ensureStagingConfigMap creates (or refreshes) the "<backup>-api" ConfigMap
+// in the backup's namespace, key api.yaml = the serialized namespace. It is
+// controller-owned (GCs with the CR) and managed-labeled (excluded from later
+// serializations). Skip-if-identical: an unchanged payload never writes, so
+// reconciles cannot hot-loop on it.
+// ponytail: a ConfigMap tops out at 1 MiB — upgrade path: agent-side
+// serialization with a read-only Job SA when namespaces outgrow it.
+func (r *PBSBackupReconciler) ensureStagingConfigMap(ctx context.Context, b *pbsv1.PBSBackup, apiYAML string) (string, error) {
+	name := b.Name + "-api"
+	existing := &corev1.ConfigMap{}
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: b.Namespace, Name: name}, existing); {
+	case err == nil:
+		if existing.Data["api.yaml"] == apiYAML {
+			return name, nil
+		}
+		existing.Data = map[string]string{"api.yaml": apiYAML}
+		if err := r.Update(ctx, existing); err != nil {
+			return "", err
+		}
+		return name, nil
+	case apierrors.IsNotFound(err):
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: b.Namespace,
+				Labels:    map[string]string{backuplib.ManagedLabel: "true"},
+			},
+			Data: map[string]string{"api.yaml": apiYAML},
+		}
+		if err := ctrl.SetControllerReference(b, cm, r.Scheme); err != nil {
+			return "", err
+		}
+		if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
+			return "", err
+		}
+		return name, nil
+	default:
+		return "", err
+	}
+}
+
+// firstNode returns the alphabetically first node name in the cluster, or ""
+// when no Node objects exist.
+func (r *PBSBackupReconciler) firstNode(ctx context.Context) (string, error) {
+	nodes := &corev1.NodeList{}
+	if err := r.List(ctx, nodes); err != nil {
+		return "", err
+	}
+	if len(nodes.Items) == 0 {
+		return "", nil
+	}
+	names := make([]string, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		names = append(names, nodes.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names[0], nil
 }
 
 // contractEqual compares two secret payloads on the repo contract keys only.
