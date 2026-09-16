@@ -1,0 +1,67 @@
+# Prod fleet CI — runs on the production GitLab ONLY (tags: [ai] runners).
+# This file is NOT part of the testenv dev loop and is never executed there:
+# dev builds go through `make docker-build load-image deploy`.
+#
+# Builds and pushes both images (operator + agent) to nexus.sharifmind.ir on
+# change to their relevant paths. Login uses the NEXUS_CI_USER /
+# NEXUS_CI_TOKEN CI/CD variables (group-level; no secrets in-repo).
+image: docker:27-cli
+
+tags: [ai]
+
+stages: [build]
+
+variables:
+  REGISTRY: nexus.sharifmind.ir
+  # Adjust to the nexus docker-hosted repository paths when they diverge.
+  OPERATOR_IMAGE: ${REGISTRY}/pbs-operator/pbs-operator
+  AGENT_IMAGE: ${REGISTRY}/pbs-operator/pbs-agent
+  # Nexus docker repos run deployment policy ALLOW_ONCE: a tag is immutable
+  # once pushed. Consequences, on purpose:
+  #  - $CI_COMMIT_SHORT_SHA tags are written exactly once per commit.
+  #  - retry (below) covers TRANSIENT failures only: a retry AFTER the tag
+  #    landed fails with "tag already exists" — delete the tag in Nexus or
+  #    wait for the next commit; never force-push.
+  #  - :main moves only with new commits on main (an old commit re-running
+  #    cannot re-push its :main).
+
+default:
+  retry: 2 # 3 attempts total (GitLab caps automatic retries at 2)
+
+.docker: &docker
+  stage: build
+  before_script:
+    - docker login "$REGISTRY" -u "$NEXUS_CI_USER" -p "$NEXUS_CI_TOKEN"
+
+build-operator:
+  <<: *docker
+  resource_group: nexus-operator # serialize pushes of the same tags
+  rules:
+    - changes:
+        - cmd/main.go
+        - api/
+        - internal/
+        - go.mod
+        - go.sum
+        - Dockerfile
+  script:
+    - docker build -t "$OPERATOR_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$OPERATOR_IMAGE:main" .
+    - docker push "$OPERATOR_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$OPERATOR_IMAGE:main"
+
+build-agent:
+  <<: *docker
+  resource_group: nexus-agent
+  rules:
+    - changes:
+        - cmd/agent/
+        - internal/agent/
+        - internal/backup/
+        - internal/pbs/
+        - go.mod
+        - go.sum
+        - Dockerfile.agent
+  script:
+    - docker build -t "$AGENT_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$AGENT_IMAGE:main" -f Dockerfile.agent .
+    - docker push "$AGENT_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$AGENT_IMAGE:main"

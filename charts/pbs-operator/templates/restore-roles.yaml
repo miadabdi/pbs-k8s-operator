@@ -1,0 +1,36 @@
+# The restore Job SA's two roles — mirrors config/rbac/restore-role.yaml and
+# restore-cluster-role.yaml. The names are LOCKED: the restore controller
+# provisions bindings to exactly "pbs-operator-pbs-restore" and
+# "pbs-operator-pbs-restore-cluster" (see internal/controller/
+# pbsrestore_controller.go restoreRoleName/restoreClusterRoleName), so they
+# must not be templated or renamed.
+#
+# Broad role: every namespaced Kind; effective ONLY in target namespaces via
+# the per-ns RoleBindings the controller creates. Narrow role: namespaces +
+# CRDs create/update only — the sole cluster-wide surface, bound via CRB.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pbs-operator-pbs-restore
+  labels:
+    app.kubernetes.io/name: pbs-operator
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: [get, list, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pbs-operator-pbs-restore-cluster
+  labels:
+    app.kubernetes.io/name: pbs-operator
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+- apiGroups: [""]
+  resources: [namespaces]
+  verbs: [get, list, create, update, patch]
+- apiGroups: [apiextensions.k8s.io]
+  resources: [customresourcedefinitions]
+  verbs: [get, list, create, update, patch]

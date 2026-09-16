@@ -1,0 +1,16 @@
+# Manager image (built from Dockerfile at the repo root).
+image:
+  repository: pbs-operator
+  tag: dev
+
+# Backup/restore agent image for the Jobs the controller creates
+# (--agent-image flag; built from Dockerfile.agent).
+agentImage: pbs-agent:dev
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
