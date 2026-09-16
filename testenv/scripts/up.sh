@@ -3,7 +3,7 @@
 #   usage: testenv/scripts/up.sh
 # Skip steps for cheap re-runs (comma-separated):
 #   SKIP=kubespray ./up.sh
-#   SKIP=keys,pbs,nodes,vendor,sideload,kubespray,apply ./up.sh   # gates only
+#   SKIP=keys,pbs,nodes,vendor,kubespray,apply ./up.sh   # gates only
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # testenv/
@@ -50,11 +50,6 @@ fi
 if ! skip vendor; then
   step "4/8 kubespray vendor"
   vendor/get-kubespray.sh
-fi
-
-if ! skip sideload; then
-  step "sideload registry.k8s.io images (geo-blocked from the VMs; before kubespray)"
-  scripts/sideload-k8s-images.sh
 fi
 
 if ! skip kubespray; then
