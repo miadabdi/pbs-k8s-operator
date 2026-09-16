@@ -1,0 +1,18 @@
+# The narrow cluster-scoped half of the restore Job SA's rights (see
+# restore-role.yaml for the split's rationale): ONLY Namespace and
+# CustomResourceDefinition create/get/list/update/patch — what an api.yaml's
+# Namespace/CRD docs need to apply (CRDs then wait for Established). Bound
+# via ClusterRoleBinding pbs-restore-<ns> to the target namespace's
+# pbs-restore SA. No delete, no Secrets, no workloads: this is the entire
+# cluster-wide surface a restore opens.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pbs-restore-cluster
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "create", "update", "patch"]

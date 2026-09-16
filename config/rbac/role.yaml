@@ -119,6 +119,7 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
+  - rolebindings
   verbs:
   - create
   - get
@@ -128,6 +129,14 @@ rules:
   - rbac.authorization.k8s.io
   resourceNames:
   - pbs-operator-pbs-restore
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - pbs-operator-pbs-restore-cluster
   resources:
   - clusterroles
   verbs:

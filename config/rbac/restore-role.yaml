@@ -1,34 +1,32 @@
-# The ClusterRole the restore Job ServiceAccount (pbs-restore, created by the
-# controller in each TARGET namespace) is bound to.
+# Two-role split for the restore Job SA (pbs-restore, created by the
+# controller in each TARGET namespace):
 #
-# BREADTH — DELIBERATE, read before tightening: a restore applies whatever
-# its api.yaml archive contains, into a namespace the operator did not choose
-# at install time. That means:
-#   - every namespaced Kind (core, apps, batch, and every CRD installed on
-#     the cluster — hence the * apiGroups) needs create/update/patch
-#   - cluster-scoped Namespace and CustomResourceDefinition docs need
-#     create/update too (the archived Namespace object itself, CRDs so
-#     archived custom resources can apply)
-# This is the same posture as Velero-class restore operators: the role can
-# create nearly anything. It is bound ONLY to the pbs-restore SAs the
-# controller provisions per target namespace (ClusterRoleBinding
-# pbs-restore-<namespace>), never to the manager, and carries no read of
-# Secrets beyond what apply itself needs. Namespace the restore targets and
-# you namespace this blast radius.
+# 1. THIS role (pbs-restore, the broad one) is bound ONLY through a
+#    per-target-namespace RoleBinding (RoleBinding→ClusterRole scopes every
+#    namespaced permission to that one namespace): the SA can create/update/
+#    patch/delete objects of ANY namespaced Kind there — core, apps, batch,
+#    every CRD's custom resources — and read Secrets/ConfigMaps there too.
+#    It can do NONE of that in any other namespace: a RoleBinding grants no
+#    cluster-scoped permissions and no rights outside its own namespace.
+#
+# 2. config/rbac/restore-cluster-role.yaml (pbs-restore-cluster, the narrow
+#    one) carries the cluster-scoped rights an api.yaml may legitimately
+#    need — creating/updating Namespaces and CRDs — and is the only role
+#    bound through a ClusterRoleBinding. That binding is the residual
+#    cluster-wide surface of a restore, by construction: create/get/list/
+#    update/patch of namespaces and CRDs, nothing else.
+#
+# Both claims that matter: Secrets are readable ONLY in the target
+# namespace, and the blast radius of the broad grant IS the target
+# namespace. Velero-class restore posture; the narrow role keeps even the
+# cluster-wide part minimal (no delete on namespaces/CRDs).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: pbs-restore
 rules:
-  # Namespaced objects of every group (incl. all CRDs' custom resources).
+  # Every namespaced Kind of every group (incl. all CRDs' custom resources).
+  # Effective ONLY inside the target namespace via the per-ns RoleBinding.
   - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # Cluster-scoped kinds an api.yaml may carry: the Namespace object itself
-  # and CustomResourceDefinitions (waited to Established before CRs apply).
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "create", "update", "patch"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["get", "list", "create", "update", "patch"]

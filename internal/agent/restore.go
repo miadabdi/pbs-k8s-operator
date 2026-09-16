@@ -247,6 +247,8 @@ func RunApplyManifests(d ApplyDeps, phase, file string, drop, keep []string, ter
 
 	switch phase {
 	case "pre":
+		// Namespace docs are cluster-scoped: they apply through the narrow
+		// cluster role the CRB grants, not the target-ns RoleBinding.
 		for _, step := range []func() bool{
 			func() bool { return apply(nsDocs) },
 			func() bool {
@@ -281,8 +283,10 @@ func RunApplyManifests(d ApplyDeps, phase, file string, drop, keep []string, ter
 }
 
 // kubectlApply writes the bucket to a temp file (kubectl apply -f - would
-// need stdin this runner has no seam for) and applies it. On failure the
-// error keeps the exit code (for exitCode) and carries kubectl's stderr.
+// need stdin this runner has no seam for) and applies it. Apply is upsert:
+// same-named pre-existing objects in the target are UPDATED, not skipped —
+// the double-restore path relies on it. On failure the error keeps the exit
+// code (for exitCode) and carries kubectl's stderr.
 func kubectlApply(d ApplyDeps, docs []backup.PlannedDoc) error {
 	f, err := os.CreateTemp("", "pbs-agent-apply-*.yaml")
 	if err != nil {

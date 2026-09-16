@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
+	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
 )
 
 // envtest runs no agent: Job outcomes are faked by stamping batch conditions
@@ -157,9 +158,22 @@ var _ = Describe("PBSRestore Controller", func() {
 		Expect(fetch.Spec.Template.Spec.ServiceAccountName).To(Equal("pbs-restore"))
 		sa := &corev1.ServiceAccount{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pbs-restore"}, sa)).To(Succeed())
+		// Blast-radius shape: the BROAD role is bound through a per-target-ns
+		// RoleBinding (all its namespaced grants scoped to this namespace);
+		// the ClusterRoleBinding carries only the narrow namespaces+CRD role.
+		rb := &rbacv1.RoleBinding{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pbs-restore"}, rb)).To(Succeed())
+		Expect(rb.RoleRef.Kind).To(Equal("ClusterRole"))
+		Expect(rb.RoleRef.Name).To(Equal(restoreRoleName))
 		crb := &rbacv1.ClusterRoleBinding{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pbs-restore-" + ns}, crb)).To(Succeed())
-		Expect(crb.RoleRef.Name).To(Equal(restoreRoleName))
+		Expect(crb.RoleRef.Name).To(Equal(restoreClusterRoleName))
+		// Sweep contract: every provisioned RBAC object is managed-labeled
+		// and carries the restore's name.
+		for _, obj := range []interface{ GetLabels() map[string]string }{sa, rb, crb} {
+			Expect(obj.GetLabels()[backuplib.ManagedLabel]).To(Equal("true"))
+			Expect(obj.GetLabels()["pbsrestore"]).To(Equal("r1"))
+		}
 		Expect(repoSecretCopy(ctx, ns, "pbsrepo-"+repo.Name)).NotTo(BeNil())
 
 		// Fetch completes but the ConfigMap is not there yet: hold.
@@ -344,6 +358,47 @@ var _ = Describe("PBSRestore Controller", func() {
 		jobs := &batchv1.JobList{}
 		Expect(k8sClient.List(ctx, jobs, client.InNamespace(ns))).To(Succeed())
 		Expect(jobs.Items).To(BeEmpty())
+	})
+
+	// 7. TTL wedge: a Job that completed and was TTL-reaped (absent but
+	// recorded state complete) counts as done — the pipeline advances past
+	// it instead of holding JobDeleted forever.
+	It("7. TTL-reaped completed Job → pipeline advances, history kept", func() {
+		makeNode(ctx, "node-a")
+		ns := "rs7"
+		makeNamespace(ctx, ns)
+		repo := makeReadyRepo(ctx, "rs7-repo")
+		rs := makeRestore(ctx, "r7", ns, ns, repo.Name, nil, nil)
+		rec := record.NewFakeRecorder(32)
+		reconcileRestore(ctx, ns, "r7", rec)
+		setJobCondition(ctx, ns, "r7-api-fetch", batchv1.JobCondition{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		uploadAPIManifest(ctx, rs)
+		reconcileRestore(ctx, ns, "r7", rec)
+		setJobCondition(ctx, ns, "r7-api-pre", batchv1.JobCondition{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		reconcileRestore(ctx, ns, "r7", rec)
+		setJobCondition(ctx, ns, "r7-vol-node-a", batchv1.JobCondition{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		reconcileRestore(ctx, ns, "r7", rec) // workload Job created; vol recorded complete
+		deleteJob(ctx, ns, "r7-vol-node-a")  // TTL reaps it an hour later
+
+		res := reconcileRestore(ctx, ns, "r7", rec)
+
+		Expect(res.RequeueAfter).To(Equal(requeueWait)) // advancing, not held
+		Expect(fetchRestore(ctx, ns, "r7").Status.Phase).To(Equal(pbsv1.RestorePhaseApplyingWorkloads))
+		workload := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "r7-api-workload"}, workload)).To(Succeed())
+		cond := meta.FindStatusCondition(fetchRestore(ctx, ns, "r7").Status.Conditions, condReady)
+		Expect(cond.Reason).NotTo(Equal("JobDeleted"))
+		// The reaped Job keeps its recorded complete state in status.Jobs.
+		Expect(recordedJobState(fetchRestore(ctx, ns, "r7"), "r7-vol-node-a")).To(Equal("complete"))
+
+		// A non-complete reaped Job (deleted mid-run) still holds.
+		deleteJob(ctx, ns, "r7-api-workload")
+		reconcileRestore(ctx, ns, "r7", rec)
+		cond = meta.FindStatusCondition(fetchRestore(ctx, ns, "r7").Status.Conditions, condReady)
+		Expect(cond.Reason).To(Equal("JobDeleted"))
 	})
 
 	// 6. Cross-namespace target: Jobs run in the target, ownerRefs skipped

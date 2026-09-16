@@ -47,9 +47,15 @@ const (
 	// any single restore).
 	restoreSA = "pbs-restore"
 
-	// restoreRoleName is the ClusterRole shipped in config/rbac/restore-role.yaml
-	// (kustomize namePrefix included). Broad on purpose: see that file.
+	// restoreRoleName is the broad ClusterRole (config/rbac/restore-role.yaml,
+	// kustomize namePrefix included) — bound through a per-target-ns
+	// RoleBinding so its namespaced grants only ever apply inside the target.
 	restoreRoleName = "pbs-operator-pbs-restore"
+
+	// restoreClusterRoleName is the narrow cluster-scoped ClusterRole
+	// (config/rbac/restore-cluster-role.yaml): namespaces + CRDs only, the
+	// sole thing a ClusterRoleBinding may ever grant the Job SA.
+	restoreClusterRoleName = "pbs-operator-pbs-restore-cluster"
 
 	reasonRestoreInvalid = "InvalidSpec"
 	reasonStagingAbsent  = "ApiManifestMissing"
@@ -104,13 +110,18 @@ type PBSRestoreReconciler struct {
 // The pbs-restore ServiceAccount is provisioned per target namespace.
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create
 
-// Provisioning the Job SA's rights: the pre-defined pbs-restore ClusterRole
-// is bound per target namespace. `bind` scoped by resourceNames to exactly
-// that one ClusterRole is the least-privilege grant — creating a binding
-// normally requires holding every permission the binding grants (which would
-// mean handing the manager the role's full breadth).
+// Provisioning the Job SA's rights per target namespace: a RoleBinding to
+// the broad pbs-restore ClusterRole (scoping ALL its namespaced grants to
+// the target — secrets and workloads of other namespaces stay unreachable)
+// and a ClusterRoleBinding to the narrow pbs-restore-cluster role (namespaces
+// + CRDs only — the whole cluster-wide surface a restore opens). `bind`
+// scoped by resourceNames to exactly those two ClusterRoles is the
+// least-privilege grant — creating a binding normally requires holding every
+// permission the binding grants.
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=pbs-operator-pbs-restore,verbs=bind
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=pbs-operator-pbs-restore-cluster,verbs=bind
 
 // Reconcile drives the phase machine New → StagingAPI → RestoringVolumes →
 // ApplyingWorkloads → Completed|Failed. Terminal phases no-op. A failed Job
@@ -215,6 +226,10 @@ func (r *PBSRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	_, _, preDocs, _ := backuplib.BucketDocs(docs, restore.Spec.DropKinds, restore.Spec.KeepKinds)
 	pvcs := backuplib.PVCsFromDocs(preDocs)
+	// ponytail: an api.yaml with no PVCs skips straight to the workload
+	// apply — an empty/mis-serialized plan can then Complete without any
+	// volume being restored; cross-check the snapshot's pvc-* archives if
+	// that ever bites.
 	if len(pvcs) > 0 {
 		done, err := r.ensureVolumeJobs(ctx, &restore, spec, docs, pvcs)
 		if err != nil || !done {
@@ -329,12 +344,27 @@ func (r *PBSRestoreReconciler) ensureRepoSecret(ctx context.Context, rs *pbsv1.P
 	}
 }
 
-// ensureJobRBAC provisions, in the target namespace: the pbs-restore
-// ServiceAccount and a ClusterRoleBinding from the pre-defined broad
-// pbs-restore role (config/rbac/restore-role.yaml). Create-if-missing and
-// never deleted: the binding has no possible ownerRef (cluster-scoped
-// dependent of a namespaced owner is invalid), and a stale binding whose SA
-// is gone is inert.
+// rbacLabels mark every RBAC object the controller provisions: the managed
+// label plus the restore's own name. These bindings have no possible
+// ownerRef (cluster-scoped dependents of a namespaced owner are invalid), so
+// they outlive their PBSRestore — the labels are the GC contract: a sweep
+// listing pbs.sharifmind.ir/managed + pbsrestore=<name> finds and deletes
+// exactly this restore's RBAC (a finalizer-based sweep is deferred; without
+// labels, anyone recreating a swept namespace + SA name would reactivate a
+// stale binding).
+func rbacLabels(restore string) map[string]string {
+	return map[string]string{
+		backuplib.ManagedLabel: "true",
+		"pbsrestore":           restore,
+	}
+}
+
+// ensureJobRBAC provisions, for the target namespace: the pbs-restore
+// ServiceAccount, a RoleBinding to the broad pbs-restore ClusterRole (this
+// is what scopes the broad grants — secrets/workloads of OTHER namespaces
+// stay unreachable), and a ClusterRoleBinding to the narrow
+// pbs-restore-cluster role (namespaces + CRDs only). Create-if-missing,
+// never deleted here — see rbacLabels for the sweep path.
 func (r *PBSRestoreReconciler) ensureJobRBAC(ctx context.Context, rs *pbsv1.PBSRestore) error {
 	sa := &corev1.ServiceAccount{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: rs.Spec.TargetNamespace, Name: restoreSA}, sa)
@@ -343,7 +373,7 @@ func (r *PBSRestoreReconciler) ensureJobRBAC(ctx context.Context, rs *pbsv1.PBSR
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      restoreSA,
 				Namespace: rs.Spec.TargetNamespace,
-				Labels:    map[string]string{backuplib.ManagedLabel: "true"},
+				Labels:    rbacLabels(rs.Name),
 			},
 		}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
@@ -352,12 +382,15 @@ func (r *PBSRestoreReconciler) ensureJobRBAC(ctx context.Context, rs *pbsv1.PBSR
 		return err
 	}
 
-	binding := "pbs-restore-" + rs.Spec.TargetNamespace
-	crb := &rbacv1.ClusterRoleBinding{}
-	err = r.Get(ctx, types.NamespacedName{Name: binding}, crb)
+	rb := &rbacv1.RoleBinding{}
+	err = r.Get(ctx, types.NamespacedName{Namespace: rs.Spec.TargetNamespace, Name: restoreSA}, rb)
 	if apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: binding},
+		if err := r.Create(ctx, &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      restoreSA,
+				Namespace: rs.Spec.TargetNamespace,
+				Labels:    rbacLabels(rs.Name),
+			},
 			Subjects: []rbacv1.Subject{{
 				Kind:      rbacv1.ServiceAccountKind,
 				Name:      restoreSA,
@@ -367,6 +400,31 @@ func (r *PBSRestoreReconciler) ensureJobRBAC(ctx context.Context, rs *pbsv1.PBSR
 				APIGroup: rbacv1.GroupName,
 				Kind:     "ClusterRole",
 				Name:     restoreRoleName,
+			},
+		}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	err = r.Get(ctx, types.NamespacedName{Name: "pbs-restore-" + rs.Spec.TargetNamespace}, crb)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "pbs-restore-" + rs.Spec.TargetNamespace,
+				Labels: rbacLabels(rs.Name),
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      restoreSA,
+				Namespace: rs.Spec.TargetNamespace,
+			}},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     restoreClusterRoleName,
 			},
 		}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
@@ -441,6 +499,13 @@ func (r *PBSRestoreReconciler) ensureJob(ctx context.Context, rs *pbsv1.PBSResto
 		return job, jobCondition(job, batchv1.JobComplete), nil
 	case apierrors.IsNotFound(err):
 		if knownJob(rs, name) {
+			// A Job that was recorded COMPLETE and is now absent finished its
+			// work and was TTL-reaped (1h) — it counts as done, or a long
+			// restore wedges at this step forever. Any other recorded state
+			// stays the JobDeleted hold.
+			if recordedJobState(rs, name) == "complete" {
+				return nil, true, nil
+			}
 			return nil, false, &restoreHold{reasonJobDeleted,
 				"job " + name + " was deleted before the restore finished; not recreating it"}
 		}
@@ -469,6 +534,17 @@ func knownJob(rs *pbsv1.PBSRestore, name string) bool {
 		}
 	}
 	return false
+}
+
+// recordedJobState is the state status.Jobs last recorded for name ("" when
+// unknown).
+func recordedJobState(rs *pbsv1.PBSRestore, name string) string {
+	for _, js := range rs.Status.Jobs {
+		if js.Job == name {
+			return js.State
+		}
+	}
+	return ""
 }
 
 // requeueOrHold converts an ensure* outcome into the reconcile result. A
@@ -506,7 +582,9 @@ func (r *PBSRestoreReconciler) requeueOrHold(ctx context.Context, rs *pbsv1.PBSR
 
 // liveJobs snapshots the restore's Jobs (label pbsrestore=<name> in the
 // target ns) as status.Jobs, pipeline order, with the phase each Job was
-// launched in derived from its name suffix.
+// launched in derived from its name suffix. Entries for Jobs no longer live
+// (TTL-reaped after completing) are carried over from the previous snapshot
+// — the recorded state is the pipeline's memory of finished work.
 func (r *PBSRestoreReconciler) liveJobs(ctx context.Context, rs *pbsv1.PBSRestore) []pbsv1.RestoreJobStatus {
 	list := &batchv1.JobList{}
 	if err := r.List(ctx, list,
@@ -514,14 +592,21 @@ func (r *PBSRestoreReconciler) liveJobs(ctx context.Context, rs *pbsv1.PBSRestor
 		client.MatchingLabels{"pbsrestore": rs.Name}); err != nil {
 		return rs.Status.Jobs // keep the last snapshot on a transient error
 	}
-	out := make([]pbsv1.RestoreJobStatus, 0, len(list.Items))
+	out := make([]pbsv1.RestoreJobStatus, 0, len(list.Items)+len(rs.Status.Jobs))
+	live := make(map[string]bool, len(list.Items))
 	for i := range list.Items {
 		j := &list.Items[i]
+		live[j.Name] = true
 		out = append(out, pbsv1.RestoreJobStatus{
 			Phase: jobPhaseByName(rs, j.Name),
 			Job:   j.Name,
 			State: jobState(j),
 		})
+	}
+	for _, js := range rs.Status.Jobs {
+		if !live[js.Job] {
+			out = append(out, js) // TTL-reaped: keep its last recorded state
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Job < out[j].Job })
 	return out

@@ -117,14 +117,25 @@ func stripPVCBinding(obj map[string]any) {
 	}
 }
 
-// stripServiceAllocations removes the allocated cluster IP(s) from a Service
-// doc: the serialized value belongs to the SOURCE namespace — applying it in
-// the target fails with "provided IP is already allocated". Let the target's
-// service CIDR assign fresh (live-verified failure mode).
+// stripServiceAllocations removes every SOURCE-owned allocation from a
+// Service doc so the target assigns fresh: the cluster IP(s) (applying the
+// source's fails "provided IP is already allocated" — live-verified), the
+// node ports (NodePort/LB services pin host ports cluster-wide; a second
+// restore or a live source service keeps them allocated), and the
+// load-balancer IP / health-check node port.
 func stripServiceAllocations(obj map[string]any) {
 	spec, _ := obj["spec"].(map[string]any)
 	delete(spec, "clusterIP")
 	delete(spec, "clusterIPs")
+	delete(spec, "loadBalancerIP")
+	delete(spec, "healthCheckNodePort")
+	if ports, ok := spec["ports"].([]any); ok {
+		for _, p := range ports {
+			if pm, ok := p.(map[string]any); ok {
+				delete(pm, "nodePort")
+			}
+		}
+	}
 }
 
 // droppedKinds are never restored regardless of drop/keep: bare Pods are

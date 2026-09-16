@@ -7,9 +7,12 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
-# Broad ClusterRole the per-target-namespace pbs-restore Job SA is bound to
-# (the controller creates the SA + ClusterRoleBinding at restore time).
+# The restore Job SA's two roles: pbs-restore (broad, namespaced grants —
+# bound per-target-namespace via a RoleBinding the controller creates) and
+# pbs-restore-cluster (narrow cluster-scoped: namespaces + CRDs only —
+# bound via a ClusterRoleBinding).
 - restore-role.yaml
+- restore-cluster-role.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

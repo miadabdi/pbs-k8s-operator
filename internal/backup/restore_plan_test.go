@@ -53,8 +53,14 @@ metadata:
   name: pg
   namespace: pg
 spec:
+  type: NodePort
   clusterIP: 10.233.16.82
   clusterIPs: [10.233.16.82]
+  loadBalancerIP: 192.0.2.50
+  healthCheckNodePort: 31000
+  ports:
+    - port: 5432
+      nodePort: 30432
 ---
 apiVersion: v1
 kind: Endpoints
@@ -173,6 +179,22 @@ func TestParseAPIManifests(t *testing.T) {
 	}
 	if _, has := svc["clusterIPs"]; has {
 		t.Error("Service clusterIPs not stripped")
+	}
+	// NodePort/LoadBalancer allocations are source-owned too: node ports
+	// pin host ports cluster-wide, the LB IP and health-check node port
+	// belong to the source's allocator. All stripped; the port itself stays.
+	if _, has := svc["loadBalancerIP"]; has {
+		t.Error("Service loadBalancerIP not stripped")
+	}
+	if _, has := svc["healthCheckNodePort"]; has {
+		t.Error("Service healthCheckNodePort not stripped")
+	}
+	port := svc["ports"].([]any)[0].(map[string]any)
+	if _, has := port["nodePort"]; has {
+		t.Error("Service port nodePort not stripped")
+	}
+	if port["port"] != float64(5432) { // JSON round-trip numbers are float64
+		t.Errorf("Service port mangled: %v", port)
 	}
 	// The PVC's source volumeName is stripped: the PV belongs to the source
 	// claim; naming it in the target leaves the restored claim Lost. The
