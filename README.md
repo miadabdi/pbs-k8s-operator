@@ -29,6 +29,12 @@ Controllers (`internal/controller/`):
   `fingerprint` from spec-first/secret-fallback), pings PBS via the REST API
   with TLS fingerprint pinning, optionally bootstraps the PBS namespace via
   `bootstrapTokenRef`, re-probes every 5m. CR spec fields win over secret keys.
+  The controller only REQUIRES those three — but the backup/restore Jobs
+  consume the secret's keys verbatim (all 8: `host`, `port`, `datastore`,
+  `namespace`, `tokenID`, `tokenSecret`, `fingerprint`, `keyfile`) with no
+  spec merge: the referenced secret MUST carry the full contract consistent
+  with the spec, or a spec-complete PBSRepo shows Ready while its Jobs fail
+  on the missing secret key / agent "missing required env".
 - **PBSBackup** — the backup pipeline below.
 - **PBSSchedule** — standard 5-field cron; fires at most one backup per missed
   slot (catch-up to the latest, never backfill); deterministic per-slot backup
@@ -233,6 +239,21 @@ alert fires correctly on namespaces that only ever failed.
   cannot express it and the API-only node pick needs cluster-scoped nodes —
   same posture as Velero-class backup operators; accepted deliberately (also
   stated in `config/rbac/role.yaml` and the controller source).
+- **Plaintext staging hop.** The serialized `api.yaml` — which INCLUDES the
+  namespace's Secrets — sits as plaintext in the `<backup>-api` ConfigMap in
+  the backed-up namespace until the PBSBackup CR (its owner) is garbage
+  collected. ConfigMaps are unencrypted etcd objects; anyone who can read
+  ConfigMaps in that namespace can read that snapshot of its Secrets. Mostly
+  co-privileged (same-namespace readers can usually read those Secrets
+  directly), but the copy also outlives deleted Secrets for the CR's
+  lifetime. Encryption-at-rest for the hop would move serialization into the
+  agent (same upgrade path as the 1 MiB ceiling above).
+- **Repo-token duplication.** Every backed-up and restore-target namespace
+  gets a copy of the repo credentials (`pbsrepo-<repo>`, all 8 contract keys
+  incl. `tokenSecret` and `keyfile`) — inherent to Jobs-run-in-the-namespace
+  dereferencing a namespace-local secret. Mitigate with a backup-scoped,
+  minimal-privilege PBS token (Backup-only, per-datastore/namespace) so the
+  copy is worth little on its own.
 - **Restore RBAC scope.** See *Restore semantics*: the broad grant is fenced
   to the target namespace by a RoleBinding; the only cluster-wide surface is
   namespace/CRD create-update (no delete, no reads beyond those kinds).
