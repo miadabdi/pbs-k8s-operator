@@ -27,6 +27,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,7 +41,8 @@ import (
 
 // ---- fixtures -----------------------------------------------------------
 
-// makeReadyRepo creates a cluster-scoped PBSRepo already marked Ready.
+// makeReadyRepo creates a cluster-scoped PBSRepo already marked Ready, with
+// its credentials secret (all 8 contract keys) in the repo's namespace.
 func makeReadyRepo(ctx context.Context, name string) *pbsv1.PBSRepo {
 	repo := &pbsv1.PBSRepo{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -54,6 +56,16 @@ func makeReadyRepo(ctx context.Context, name string) *pbsv1.PBSRepo {
 		},
 	}
 	Expect(k8sClient.Create(ctx, repo)).To(Succeed())
+	createSecret(ctx, repo.Spec.SecretRef.Name, "default", map[string][]byte{
+		"host":        []byte("192.0.2.10"),
+		"port":        []byte("8007"),
+		"datastore":   []byte("store"),
+		"namespace":   []byte("ns"),
+		"tokenID":     []byte("op@pbs!producer"),
+		"tokenSecret": []byte("prod-secret"),
+		"fingerprint": []byte("AA:BB:CC"),
+		"keyfile":     []byte("-----BEGIN PRIVATE KEY-----"),
+	})
 	repo.Status.Conditions = []metav1.Condition{{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -62,6 +74,18 @@ func makeReadyRepo(ctx context.Context, name string) *pbsv1.PBSRepo {
 	}}
 	Expect(k8sClient.Status().Update(ctx, repo)).To(Succeed())
 	return repo
+}
+
+// repoSecretCopy fetches the controller-copied repo secret from the backup's
+// namespace (empty string when absent).
+func repoSecretCopy(ctx context.Context, ns, name string) *corev1.Secret {
+	s := &corev1.Secret{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, s)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	Expect(err).NotTo(HaveOccurred())
+	return s
 }
 
 // makeLocalPV creates a PV with local-path style hostname node affinity.
@@ -354,10 +378,29 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(sel.NodeSelectorTerms[0].MatchExpressions[0].Values).To(Equal([]string{"node-a"}))
 		Expect(job.Spec.Template.Spec.Hostname).To(Equal("bk-2-node-a"))
 
-		// BuildBackupJob contract spot-checks: env from repo secret, PVC mount.
+		// The repo secret is copied into the backup's namespace (secrets are
+		// namespace-scoped; the Job's secretKeyRef must resolve locally).
+		copyName := "pbsrepo-" + repo.Name
+		copied := repoSecretCopy(ctx, "default", copyName)
+		Expect(copied).NotTo(BeNil())
+		cRefs := copied.GetOwnerReferences()
+		Expect(cRefs).To(HaveLen(1))
+		Expect(cRefs[0].UID).To(Equal(b.UID))
+		Expect(cRefs[0].Controller).NotTo(BeNil())
+		Expect(*cRefs[0].Controller).To(BeTrue())
+		for k, v := range map[string]string{
+			"host": "192.0.2.10", "port": "8007", "datastore": "store",
+			"namespace": "ns", "tokenID": "op@pbs!producer",
+			"tokenSecret": "prod-secret", "fingerprint": "AA:BB:CC",
+			"keyfile": "-----BEGIN PRIVATE KEY-----",
+		} {
+			Expect(string(copied.Data[k])).To(Equal(v), "contract key "+k)
+		}
+
+		// BuildBackupJob contract spot-checks: env from the copied repo secret, PVC mount.
 		env := envOf(job)
 		Expect(env).To(HaveLen(8))
-		Expect(env["PBS_HOST"].ValueFrom.SecretKeyRef.Name).To(Equal(repo.Spec.SecretRef.Name))
+		Expect(env["PBS_HOST"].ValueFrom.SecretKeyRef.Name).To(Equal(copyName))
 		Expect(env["PBS_HOST"].ValueFrom.SecretKeyRef.Key).To(Equal("host"))
 		Expect(env["PBS_TOKEN_SECRET"].ValueFrom.SecretKeyRef.Key).To(Equal("tokenSecret"))
 		c := job.Spec.Template.Spec.Containers[0]
@@ -464,6 +507,12 @@ var _ = Describe("PBSBackup Controller", func() {
 		}
 		Expect(claims(byName["bk-5-node-a"])).To(Equal([]string{"bk-5-data-a"}))
 		Expect(claims(byName["bk-5-node-b"])).To(Equal([]string{"bk-5-data-b"}))
+
+		// One shared copy of the repo secret; both Jobs reference it.
+		Expect(repoSecretCopy(ctx, "default", "pbsrepo-"+repo.Name)).NotTo(BeNil())
+		for name, j := range byName {
+			Expect(envOf(j)["PBS_TOKEN_ID"].ValueFrom.SecretKeyRef.Name).To(Equal("pbsrepo-"+repo.Name), name)
+		}
 	})
 
 	It("6. idempotent re-reconcile; Job deleted while running → event + requeue, no recreate", func() {
@@ -565,5 +614,30 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(events).To(HaveLen(1))
 		Expect(events[0]).To(ContainSubstring("bk-9-data"))
 		Expect(backupJobs(ctx, b)).To(BeEmpty())
+	})
+
+	It("extra. repo secret vanished → copy fails: event, requeue 1m, stays Scheduled, no jobs", func() {
+		repo := makeReadyRepo(ctx, "bk-10-repo")
+		makeBackup(ctx, "bk-10", "default", repo.Name, "whatever-pvc")
+		// The repo stays Ready, but its source secret disappears.
+		src := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Namespace: "default", Name: repo.Spec.SecretRef.Name,
+		}, src)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, src)).To(Succeed())
+
+		rec := record.NewFakeRecorder(16)
+		res := reconcileBackup(ctx, "default", "bk-10", rec)
+
+		Expect(res.RequeueAfter).To(Equal(time.Minute))
+		b := fetchBackup(ctx, "default", "bk-10")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseScheduled))
+		cond := meta.FindStatusCondition(b.Status.Conditions, "Ready")
+		Expect(cond.Reason).To(Equal("SecretCopyFailed"))
+		events := drainEvents(rec)
+		Expect(events).To(HaveLen(1))
+		Expect(events[0]).To(ContainSubstring(repo.Spec.SecretRef.Name))
+		Expect(backupJobs(ctx, b)).To(BeEmpty())
+		Expect(repoSecretCopy(ctx, "default", "pbsrepo-"+repo.Name)).To(BeNil())
 	})
 })

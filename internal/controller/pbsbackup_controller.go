@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,7 @@ const (
 	reasonRepoNotReady = "RepoNotReady"
 	reasonNoPVCs       = "NoPVCsSelected"
 	reasonUnplaceable  = "PlacementFailed"
+	reasonSecretCopy   = "SecretCopyFailed"
 	reasonJobDeleted   = "JobDeleted"
 	reasonBadResult    = "ResultUnreadable"
 	reasonRunning      = "Running"
@@ -83,6 +85,9 @@ type PBSBackupReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
+// The repo credentials secret is copied into each PBSBackup's namespace
+// before Jobs are created (secrets are namespace-scoped).
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=create;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
 
@@ -113,6 +118,17 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if !meta.IsStatusConditionTrue(repo.Status.Conditions, condReady) {
 		return r.hold(ctx, &backup, reasonRepoNotReady, "PBSRepo "+repo.Name+" is not Ready", requeueWait)
+	}
+
+	// Secrets are namespace-scoped: the repo's credentials secret lives in
+	// secretRef.namespace, but the Jobs (and their secretKeyRef env) run in
+	// the backup's namespace — copy the contract keys across first.
+	repoSecret, problem, err := r.ensureRepoSecret(ctx, &backup, &repo)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if problem != "" {
+		return r.hold(ctx, &backup, reasonSecretCopy, problem, requeueWait)
 	}
 
 	// 3. PVC selection: spec.pvcs > spec.selector > all PVCs in the namespace.
@@ -173,7 +189,7 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				Name:       name,
 				Namespace:  backup.Namespace,
 				Node:       node,
-				RepoSecret: repo.Spec.SecretRef.Name,
+				RepoSecret: repoSecret,
 				PVCs:       groups[node],
 				Image:      r.agentImage(),
 			})
@@ -222,6 +238,80 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 type placedJob struct {
 	node string
 	job  *batchv1.Job
+}
+
+// repoSecretKeys is the exact agent env contract copied from the repo's
+// credentials secret (mirrors internal/backup envContract).
+var repoSecretKeys = []string{
+	"host", "port", "datastore", "namespace",
+	"tokenID", "tokenSecret", "fingerprint", "keyfile",
+}
+
+// ensureRepoSecret copies the repo's credentials secret into the backup's
+// namespace as "pbsrepo-<repo>" (deterministic, recognizable), carrying only
+// the contract keys verbatim. The copy is controller-owned by the backup (GCs
+// with the CR) and is created-or-updated idempotently: keys are refreshed when
+// they drift. Returns the copy's name; problem is a user-facing copy failure
+// (e.g. the source secret vanished although the repo is Ready).
+// ponytail: with several backups to the same repo in one namespace, the first
+// backup owns the copy and it GCs with THAT CR; per-backup copies if that
+// ever bites.
+func (r *PBSBackupReconciler) ensureRepoSecret(ctx context.Context, b *pbsv1.PBSBackup, repo *pbsv1.PBSRepo) (name, problem string, err error) {
+	srcNS := repo.Spec.SecretRef.Namespace
+	if srcNS == "" {
+		srcNS = operatorNamespace()
+	}
+	src := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: srcNS, Name: repo.Spec.SecretRef.Name}, src); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "repo secret " + srcNS + "/" + repo.Spec.SecretRef.Name + " not found", nil
+		}
+		return "", "", err
+	}
+	data := make(map[string][]byte, len(repoSecretKeys))
+	for _, k := range repoSecretKeys {
+		if v, ok := src.Data[k]; ok {
+			data[k] = v
+		}
+	}
+
+	name = "pbsrepo-" + repo.Name
+	existing := &corev1.Secret{}
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: b.Namespace, Name: name}, existing); {
+	case err == nil:
+		if contractEqual(existing.Data, data) {
+			return name, "", nil
+		}
+		existing.Data = data
+		if err := r.Update(ctx, existing); err != nil {
+			return "", "", err
+		}
+		return name, "", nil
+	case apierrors.IsNotFound(err):
+		copySec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.Namespace},
+			Data:       data,
+		}
+		if err := ctrl.SetControllerReference(b, copySec, r.Scheme); err != nil {
+			return "", "", err
+		}
+		if err := r.Create(ctx, copySec); err != nil && !apierrors.IsAlreadyExists(err) {
+			return "", "", err
+		}
+		return name, "", nil
+	default:
+		return "", "", err
+	}
+}
+
+// contractEqual compares two secret payloads on the repo contract keys only.
+func contractEqual(a, b map[string][]byte) bool {
+	for _, k := range repoSecretKeys {
+		if !bytes.Equal(a[k], b[k]) {
+			return false
+		}
+	}
+	return true
 }
 
 // hold blocks progress without regressing the phase machine (a Running backup

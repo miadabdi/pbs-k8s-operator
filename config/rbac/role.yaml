@@ -17,10 +17,19 @@ rules:
   - persistentvolumeclaims
   - persistentvolumes
   - pods
-  - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
   - watch
 - apiGroups:
   - batch
