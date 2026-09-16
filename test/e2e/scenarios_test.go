@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/hooks"
 )
 
 // assertHappyBackup covers the shared happy path: terminal Completed phase,
@@ -401,6 +402,34 @@ func TestScheduledBackupsAndMetrics(t *testing.T) {
 	last, ok := metricLine(body, "pbs_backup_last_success_timestamp_seconds", pgNS)
 	if !ok || last <= 0 {
 		t.Fatalf("pbs_backup_last_success_timestamp_seconds{namespace=%q} = %v (present: %v), want > 0\nbody head:\n%s", pgNS, last, ok, head(body, 400))
+	}
+}
+
+// Scenario 11 (M4): the pg fixture pod carries pre-hook annotations (fixture-
+// applied via STS rolling update); the pg_dump hook runs inside the real pg
+// pod before Jobs are created and the backup still Completes, with no
+// HookFailed/HookInvalid event. (The dump's live spot-restore on the PBS VM is
+// the controller's post-merge acceptance, outside this suite.)
+func TestBackupWithPreHook(t *testing.T) {
+	requireEnv(t)
+
+	// The live pg pod must carry the hook contract, else this proves nothing.
+	pods := &corev1.PodList{}
+	if err := k8s.List(ctx, pods, client.InNamespace(pgNS), client.MatchingLabels{"app": "pg"}); err != nil || len(pods.Items) == 0 {
+		t.Fatalf("no pg pod in %s (fixture not applied?): %v", pgNS, err)
+	}
+	ann := pods.Items[0].Annotations
+	if ann[hooks.AnnotationContainer] != "postgres" || ann[hooks.AnnotationCommand] == "" {
+		t.Fatalf("pg pod lacks pre-hook annotations (apply testenv/fixtures/pg.yaml first): %v", ann)
+	}
+
+	name := fmt.Sprintf("pg-e2e-hook-%d", runID)
+	newBackup(t, pgNS, name, repoName, nil)
+	assertHappyBackup(t, pgNS, name, pgNode, false)
+	for _, reason := range []string{"HookFailed", "HookInvalid"} {
+		if backupHasEvent(pgNS, name, reason, "") {
+			t.Fatalf("backup %s completed but has a %s event", name, reason)
+		}
 	}
 }
 

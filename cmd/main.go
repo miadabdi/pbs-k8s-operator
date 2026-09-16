@@ -41,6 +41,7 @@ import (
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
 	"gitlab.sharifmind.ir/miad/pbs-operator/internal/controller"
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/hooks"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -218,6 +219,8 @@ func main() {
 		// M3: backup phase transitions are exported on the manager's metrics
 		// registry (last_success, duration, errors_total — namespace-labeled).
 		Metrics: controller.NewBackupMetrics(metrics.Registry),
+		// M4: pre-backup hooks exec into target pods (SPDY pods/exec).
+		HookExecutor: hooks.NewExecutor(mgr.GetConfig()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsbackup")
 		os.Exit(1)

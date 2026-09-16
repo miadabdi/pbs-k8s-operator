@@ -43,6 +43,7 @@ import (
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	// Aliased: the local variable "backup" in Reconcile shadows the package name.
 	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/hooks"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -59,6 +60,8 @@ const (
 	reasonNoPVCs       = "NoPVCsSelected"
 	reasonUnplaceable  = "PlacementFailed"
 	reasonSecretCopy   = "SecretCopyFailed"
+	reasonHookInvalid  = "HookInvalid"
+	reasonHookFailed   = "HookFailed"
 	reasonJobDeleted   = "JobDeleted"
 	reasonBadResult    = "ResultUnreadable"
 	reasonRunning      = "Running"
@@ -88,6 +91,10 @@ type PBSBackupReconciler struct {
 
 	// Metrics holds the operator's Prometheus vecs (M3); nil disables emission.
 	Metrics *BackupMetrics
+
+	// HookExecutor runs pre-backup hook commands inside target containers
+	// (M4); main wires hooks.NewExecutor(mgr.GetConfig()).
+	HookExecutor hooks.Executor
 }
 
 // BackupMetrics is the operator's Prometheus contract. Labels: namespace only.
@@ -145,6 +152,8 @@ func (r *PBSBackupReconciler) observeFailed(b *pbsv1.PBSBackup) {
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsbackups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// M4: pre-backup hooks exec into target pods through the pods/exec subresource.
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
 // The repo credentials secret is copied into each PBSBackup's namespace
@@ -277,6 +286,20 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		groups[node] = append(groups[node], pvcs[i].Name)
 	}
 
+	// 4.5 Pre-exec hooks (M4): before the FIRST Job creation, run every hooked
+	// pod's command sequentially. status.Jobs non-empty means Jobs (and hooks)
+	// already ran — re-reconciles must never re-exec hooks. Any hook problem
+	// is terminal (Failed, no Jobs, no requeue).
+	if len(backup.Status.Jobs) == 0 {
+		problem, reason, err := r.runPreHooks(ctx, pvcs, pods.Items)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if problem != "" {
+			return r.failBackup(ctx, &backup, reason, problem, nil)
+		}
+	}
+
 	// 5-6. One deterministic, controller-owned Job per node; never duplicate,
 	// never recreate a Job that vanished mid-run (TTL/GC owns cleanup).
 	nodes := make([]string, 0, len(groups))
@@ -357,6 +380,51 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 type placedJob struct {
 	node string
 	job  *batchv1.Job
+}
+
+// runPreHooks (M4) executes the pre-backup hook of every pod in the backup's
+// namespace that mounts one of the selected PVCs, sequentially in pod-name
+// order (deterministic across reconciles). Pods without hook annotations are
+// untouched, as are hooked pods mounting unselected PVCs. An invalid
+// annotation (HookInvalid) or a failed exec (HookFailed) is terminal: the
+// returned problem/reason feed a Failed phase and no Jobs are created.
+// ponytail: crash between hook exec and the status write re-execs hooks once
+// on the next reconcile; per-backup hook-run bookkeeping if that ever bites.
+func (r *PBSBackupReconciler) runPreHooks(ctx context.Context, pvcs []corev1.PersistentVolumeClaim, pods []corev1.Pod) (problem, reason string, err error) {
+	selected := make(map[string]bool, len(pvcs))
+	for i := range pvcs {
+		selected[pvcs[i].Name] = true
+	}
+	names := make([]string, 0, len(pods))
+	byName := make(map[string]*corev1.Pod, len(pods))
+	for i := range pods {
+		for _, vol := range pods[i].Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && selected[vol.PersistentVolumeClaim.ClaimName] {
+				names = append(names, pods[i].Name)
+				byName[pods[i].Name] = &pods[i]
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pod := byName[name]
+		container, command, hasHook, perr := hooks.ParseHook(pod)
+		if perr != nil {
+			return "pod " + pod.Name + ": " + perr.Error(), reasonHookInvalid, nil
+		}
+		if !hasHook {
+			continue
+		}
+		if r.HookExecutor == nil {
+			return "pre-hook in pod " + pod.Name + " cannot run: no hook executor configured",
+				reasonHookFailed, nil
+		}
+		if eerr := r.HookExecutor.Exec(ctx, pod.Namespace, pod.Name, container, command, hooks.HookTimeout); eerr != nil {
+			return "pre-hook in pod " + pod.Name + " failed: " + eerr.Error(), reasonHookFailed, nil
+		}
+	}
+	return "", "", nil
 }
 
 // repoSecretKeys is the exact agent env contract copied from the repo's

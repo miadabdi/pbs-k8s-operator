@@ -37,6 +37,12 @@ spec:
     metadata:
       labels:
         app: pg
+      annotations:
+        # M4 pre-backup hook: the operator execs pg_dump inside the postgres
+        # container before creating backup Jobs; the dump lands at the data
+        # volume root, alongside probe.bin, so it rides the PVC snapshot.
+        pbs.backup/pre-hook-container: "postgres"
+        pbs.backup/pre-hook-command: '["pg_dump","-U","postgres","-Fc","-f","/var/lib/postgresql/data/dump.pgc"]'
     spec:
       nodeSelector:
         kubernetes.io/hostname: k8s-ctl1

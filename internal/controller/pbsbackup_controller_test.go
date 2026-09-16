@@ -41,6 +41,7 @@ import (
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/hooks"
 )
 
 // ---- fixtures -----------------------------------------------------------
@@ -191,14 +192,35 @@ func reconcileBackup(ctx context.Context, ns, name string, rec record.EventRecor
 }
 
 // reconcileBackupWith runs one backup reconcile carrying optional metrics.
+// The hook executor is the real SPDY one (envtest has no kubelet: an exec
+// against it must fail — the M4 failure-path contract).
 func reconcileBackupWith(ctx context.Context, ns, name string, rec record.EventRecorder, m *BackupMetrics) reconcile.Result {
 	r := &PBSBackupReconciler{
-		Client:     k8sClient,
-		Scheme:     k8sClient.Scheme(),
-		Recorder:   rec,
-		AgentImage: "pbs-agent:dev",
-		Serializer: serializer,
-		Metrics:    m,
+		Client:       k8sClient,
+		Scheme:       k8sClient.Scheme(),
+		Recorder:     rec,
+		AgentImage:   "pbs-agent:dev",
+		Serializer:   serializer,
+		Metrics:      m,
+		HookExecutor: hooks.NewExecutor(cfg),
+	}
+	res, err := r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	return res
+}
+
+// reconcileBackupHooks is reconcileBackupWith with an injectable hook
+// executor (the seam for success/ordering specs).
+func reconcileBackupHooks(ctx context.Context, ns, name string, rec record.EventRecorder, exec hooks.Executor) reconcile.Result {
+	r := &PBSBackupReconciler{
+		Client:       k8sClient,
+		Scheme:       k8sClient.Scheme(),
+		Recorder:     rec,
+		AgentImage:   "pbs-agent:dev",
+		Serializer:   serializer,
+		HookExecutor: exec,
 	}
 	res, err := r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
@@ -865,5 +887,165 @@ var _ = Describe("PBSBackup metrics", func() {
 		// The failure gauges stay untouched: never set, never regressed.
 		Expect(testutil.ToFloat64(m.LastSuccess.WithLabelValues("bk-m2"))).To(Equal(0.0))
 		Expect(testutil.ToFloat64(m.Duration.WithLabelValues("bk-m2"))).To(Equal(0.0))
+	})
+})
+
+// ---- M4: pre-exec hooks ----------------------------------------------------
+
+// fakeExec records exec calls in order; err non-nil fails every exec.
+type fakeExec struct {
+	err   error
+	calls []string // "ns/pod:container:argv..."
+}
+
+func (f *fakeExec) Exec(_ context.Context, ns, pod, container string, command []string, _ time.Duration) error {
+	f.calls = append(f.calls, ns+"/"+pod+":"+container+":"+strings.Join(command, " "))
+	return f.err
+}
+
+// makeHookedPod creates a pod with NO nodeName (envtest has no kubelet; a real
+// exec must fail fast with "no host assigned") mounting pvcName, carrying the
+// given annotations.
+func makeHookedPod(ctx context.Context, name, ns, pvcName string, annotations map[string]string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Annotations: annotations},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{
+				{Name: "app", Image: "app:dev"},
+				{Name: "sidecar", Image: "side:dev"},
+			},
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+				},
+			}},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	return pod
+}
+
+var _ = Describe("PBSBackup pre-hooks", func() {
+	ctx := context.Background()
+
+	const dumpArgv = `["pg_dump","-U","postgres","-Fc","-f","/dump.pgc"]`
+
+	// hookFixture seeds a namespace with repo, PV (node-a), PVC, and returns nothing.
+	hookFixture := func(ns, pvc string) {
+		makeNamespace(ctx, ns)
+		repo := makeReadyRepo(ctx, ns+"-repo")
+		makeLocalPV(ctx, ns+"-pv", "node-a")
+		makePVC(ctx, pvc, ns, ns+"-pv")
+		makeBackup(ctx, ns, ns, repo.Name, pvc)
+	}
+
+	It("h1. hooked pods exec sequentially in pod-name order, then Jobs launch", func() {
+		hookFixture("bk-h1", "bk-h1-data")
+		// z-pod names its container; a-pod relies on the first-container default.
+		makeHookedPod(ctx, "z-pod", "bk-h1", "bk-h1-data",
+			map[string]string{hooks.AnnotationCommand: dumpArgv, hooks.AnnotationContainer: "sidecar"})
+		makeHookedPod(ctx, "a-pod", "bk-h1", "bk-h1-data",
+			map[string]string{hooks.AnnotationCommand: `["sync"]`})
+
+		fake := &fakeExec{}
+		res := reconcileBackupHooks(ctx, "bk-h1", "bk-h1", record.NewFakeRecorder(32), fake)
+
+		Expect(fake.calls).To(Equal([]string{
+			"bk-h1/a-pod:app:sync", // alphabetical first, default container
+			"bk-h1/z-pod:sidecar:" + `pg_dump -U postgres -Fc -f /dump.pgc`,
+		}))
+		b := fetchBackup(ctx, "bk-h1", "bk-h1")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseRunning))
+		Expect(backupJobs(ctx, b)).To(HaveLen(1))
+
+		// Re-reconcile (Jobs known): hooks never re-run.
+		fake.calls = nil
+		reconcileBackupHooks(ctx, "bk-h1", "bk-h1", record.NewFakeRecorder(32), fake)
+		Expect(fake.calls).To(BeEmpty())
+		Expect(res.RequeueAfter).To(Equal(time.Minute))
+	})
+
+	It("h2. real exec against envtest (no kubelet) → Failed/HookFailed, no Jobs, event", func() {
+		hookFixture("bk-h2", "bk-h2-data")
+		makeHookedPod(ctx, "bk-h2-pod", "bk-h2", "bk-h2-data",
+			map[string]string{hooks.AnnotationCommand: dumpArgv, hooks.AnnotationContainer: "app"})
+
+		rec := record.NewFakeRecorder(32)
+		res := reconcileBackupWith(ctx, "bk-h2", "bk-h2", rec, nil)
+
+		Expect(res.RequeueAfter).To(BeZero()) // terminal, no requeue
+		b := fetchBackup(ctx, "bk-h2", "bk-h2")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseFailed))
+		cond := meta.FindStatusCondition(b.Status.Conditions, "Ready")
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("HookFailed"))
+		Expect(cond.Message).To(ContainSubstring("bk-h2-pod"))
+		events := drainEvents(rec)
+		Expect(events).To(HaveLen(1))
+		Expect(events[0]).To(ContainSubstring("HookFailed"))
+		Expect(events[0]).To(ContainSubstring("bk-h2-pod"))
+		Expect(backupJobs(ctx, b)).To(BeEmpty())
+	})
+
+	It("h3. malformed hook annotation → Failed/HookInvalid, no Jobs, no exec", func() {
+		hookFixture("bk-h3", "bk-h3-data")
+		makeHookedPod(ctx, "bk-h3-pod", "bk-h3", "bk-h3-data",
+			map[string]string{hooks.AnnotationCommand: `["pg_dump", oops`, hooks.AnnotationContainer: "app"})
+
+		fake := &fakeExec{}
+		rec := record.NewFakeRecorder(32)
+		res := reconcileBackupHooks(ctx, "bk-h3", "bk-h3", rec, fake)
+
+		Expect(fake.calls).To(BeEmpty())
+		Expect(res.RequeueAfter).To(BeZero())
+		b := fetchBackup(ctx, "bk-h3", "bk-h3")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseFailed))
+		cond := meta.FindStatusCondition(b.Status.Conditions, "Ready")
+		Expect(cond.Reason).To(Equal("HookInvalid"))
+		Expect(cond.Message).To(ContainSubstring("bk-h3-pod"))
+		Expect(cond.Message).To(ContainSubstring(hooks.AnnotationCommand))
+		events := drainEvents(rec)
+		Expect(events).To(HaveLen(1))
+		Expect(events[0]).To(ContainSubstring("HookInvalid"))
+		Expect(backupJobs(ctx, b)).To(BeEmpty())
+	})
+
+	It("h4. unhooked mounting pod and hooked NON-mounting pod → untouched, Jobs as today", func() {
+		hookFixture("bk-h4", "bk-h4-data")
+		// Mounts the selected PVC but carries no annotations.
+		makeHookedPod(ctx, "bk-h4-plain", "bk-h4", "bk-h4-data", nil)
+		// Hooked, but mounts a PVC that is NOT selected.
+		makePVC(ctx, "bk-h4-other", "bk-h4", "")
+		makeHookedPod(ctx, "bk-h4-elsewhere", "bk-h4", "bk-h4-other",
+			map[string]string{hooks.AnnotationCommand: `["boom"]`})
+
+		fake := &fakeExec{}
+		reconcileBackupHooks(ctx, "bk-h4", "bk-h4", record.NewFakeRecorder(32), fake)
+
+		Expect(fake.calls).To(BeEmpty())
+		b := fetchBackup(ctx, "bk-h4", "bk-h4")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseRunning))
+		Expect(backupJobs(ctx, b)).To(HaveLen(1))
+	})
+
+	It("h5. exec error (non-zero exit) → Failed/HookFailed naming pod and error", func() {
+		hookFixture("bk-h5", "bk-h5-data")
+		makeHookedPod(ctx, "bk-h5-pod", "bk-h5", "bk-h5-data",
+			map[string]string{hooks.AnnotationCommand: dumpArgv})
+
+		fake := &fakeExec{err: fmt.Errorf("command terminated with exit code 1")}
+		rec := record.NewFakeRecorder(32)
+		reconcileBackupHooks(ctx, "bk-h5", "bk-h5", rec, fake)
+
+		b := fetchBackup(ctx, "bk-h5", "bk-h5")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseFailed))
+		cond := meta.FindStatusCondition(b.Status.Conditions, "Ready")
+		Expect(cond.Reason).To(Equal("HookFailed"))
+		Expect(cond.Message).To(ContainSubstring("bk-h5-pod"))
+		Expect(cond.Message).To(ContainSubstring("exit code 1"))
+		Expect(drainEvents(rec)).To(HaveLen(1))
+		Expect(backupJobs(ctx, b)).To(BeEmpty())
 	})
 })
