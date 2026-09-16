@@ -174,7 +174,7 @@ load-image: ## Save images to testenv/.image-cache and import them into the Vagr
 	@for node in $(NODES); do \
 		for image in pbs-operator pbs-agent; do \
 			echo "Importing $$image into $$node"; \
-			vagrant ssh $$node -c 'sudo ctr -n k8s.io images import /vagrant/.image-cache/'$$image'.tar'; \
+			(cd testenv && vagrant ssh $$node -c 'sudo ctr -n k8s.io images import /vagrant/.image-cache/'$$image'.tar'); \
 		done \
 	done
 
