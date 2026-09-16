@@ -96,11 +96,24 @@ type PBSBackupReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=create;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
-// M2: namespace API serialization reads every namespaced object type (nodes
-// list picks the API-only backup's node; covered by the wildcard).
+// M2: namespace API serialization reads every namespaced object type.
+// Accepted risk, stated explicitly: read-only get;list over ALL groups and
+// resources — secrets included, in every namespace — auto-expanding with
+// every newly installed CRD. Inherent to dynamic full-namespace
+// serialization: a namespaced Role cannot express it, and the API-only node
+// pick needs cluster-scoped nodes. Same posture as Velero-class backup
+// operators; accepted deliberately for this operator.
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list
-// The staging ConfigMap (<backup>-api) carries the serialized api.yaml.
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;create;update
+// firstNode lists Nodes through the manager's cached client: the Node
+// informer needs watch on top of the wildcard's get;list (without it the
+// watch 403s forever and the informer re-lists, and a cold informer can
+// answer before its initial sync → spurious "no nodes found").
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
+// The staging ConfigMap (<backup>-api) carries the serialized api.yaml. The
+// controller reads it through the manager's cached client, so the ConfigMap
+// informer needs watch (same class as the Node rule above; without it the
+// watch 403s and the reflector retries forever).
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;create;update;watch
 
 // Reconcile walks the phase machine New → Scheduled → Running →
 // Completed|Failed. Terminal phases no-op. See the helper docs for events,

@@ -203,6 +203,18 @@ func TestSerializeNamespaceEmpty(t *testing.T) {
 	}
 }
 
+func TestHasVerb(t *testing.T) {
+	if !hasVerb([]string{"get", "list", "watch"}, "list") {
+		t.Error("explicit verb list must match")
+	}
+	if hasVerb([]string{"get"}, "list") {
+		t.Error("absent verb must not match")
+	}
+	if !hasVerb([]string{"*"}, "list") {
+		t.Error(`verbs ["*"] (some aggregated APIs) grants every verb`)
+	}
+}
+
 func TestStripVolatile(t *testing.T) {
 	u := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "Pod",

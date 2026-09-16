@@ -154,10 +154,11 @@ func stripVolatile(obj map[string]any) {
 	}
 }
 
-// hasVerb reports whether the discovery verbs allow the list operation.
+// hasVerb reports whether the discovery verbs allow the operation. Some
+// aggregated APIs advertise verbs: ["*"] — that grants every verb.
 func hasVerb(verbs []string, verb string) bool {
 	for _, v := range verbs {
-		if v == verb {
+		if v == verb || v == "*" {
 			return true
 		}
 	}
