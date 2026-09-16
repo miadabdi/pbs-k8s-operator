@@ -43,7 +43,10 @@ Re-runs are cheap: `SKIP=kubespray ./up.sh`, or comma-separated step names
 
 ## RAM / disk cautions
 
-The full stack needs ~13 GB host RAM and lots of disk; the host has ~44 G
+The full stack commits ~11.25 GB of host RAM (pbs 4096 + k8s-ctl1 4096 +
+k8s-node1 3072 — sizes chosen so the host OOM guard stops killing kubespray
+runs; etcd+control plane fit in 4 GB, the calico+kubelet worker in 3 GB) and
+lots of disk; the host has ~44 G
 free. If pressure hits between heavy phases: `vagrant suspend pbs` (the
 k8s-only phases don't need PBS). If free disk drops below ~10 G, stop and
 `vagrant destroy` + rebuild rather than letting VM disks fill the host.
