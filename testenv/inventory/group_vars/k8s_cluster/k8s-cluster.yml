@@ -16,3 +16,7 @@ download_run_once: true
 # controller pulls with docker (host has docker 29 + proxy); nerdctl is
 # node-side only — without this kubespray would run nerdctl on the controller.
 image_command_tool_on_localhost: docker
+# controller-side save must use `docker save` (matching the docker pull);
+# ctr/containerd is node-side — without this "Save and compress image" runs
+# `ctr image export` on the controller and fails.
+container_manager_on_localhost: docker
