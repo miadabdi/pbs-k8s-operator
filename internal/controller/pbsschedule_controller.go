@@ -30,10 +30,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 )
@@ -57,7 +57,7 @@ const (
 type PBSScheduleReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder recorder.EventRecorder
 
 	// Now is the clock seam (envtest); nil → time.Now.
 	Now func() time.Time
@@ -179,7 +179,7 @@ func (r *PBSScheduleReconciler) fireBackup(ctx context.Context, schedule *pbsv1.
 		}
 		return false, err
 	}
-	r.Recorder.Event(schedule, corev1.EventTypeNormal, reasonBackupMade,
+	r.Recorder.Eventf(schedule, nil, corev1.EventTypeNormal, reasonBackupMade, "",
 		"created PBSBackup "+backup.Name+" for fire time "+fire.Format(time.RFC3339))
 	return true, nil
 }
@@ -219,7 +219,7 @@ func (r *PBSScheduleReconciler) hold(ctx context.Context, schedule *pbsv1.PBSSch
 		return ctrl.Result{}, err
 	}
 	if transitioned {
-		r.Recorder.Event(schedule, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(schedule, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	return ctrl.Result{RequeueAfter: wait}, nil
 }

@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -187,14 +186,14 @@ func fetchBackup(ctx context.Context, ns, name string) *pbsv1.PBSBackup {
 	return b
 }
 
-func reconcileBackup(ctx context.Context, ns, name string, rec record.EventRecorder) reconcile.Result {
+func reconcileBackup(ctx context.Context, ns, name string, rec *fakeEventRecorder) reconcile.Result {
 	return reconcileBackupWith(ctx, ns, name, rec, nil)
 }
 
 // reconcileBackupWith runs one backup reconcile carrying optional metrics.
 // The hook executor is the real SPDY one (envtest has no kubelet: an exec
 // against it must fail — the M4 failure-path contract).
-func reconcileBackupWith(ctx context.Context, ns, name string, rec record.EventRecorder, m *BackupMetrics) reconcile.Result {
+func reconcileBackupWith(ctx context.Context, ns, name string, rec *fakeEventRecorder, m *BackupMetrics) reconcile.Result {
 	r := &PBSBackupReconciler{
 		Client:       k8sClient,
 		Scheme:       k8sClient.Scheme(),
@@ -213,7 +212,7 @@ func reconcileBackupWith(ctx context.Context, ns, name string, rec record.EventR
 
 // reconcileBackupHooks is reconcileBackupWith with an injectable hook
 // executor (the seam for success/ordering specs).
-func reconcileBackupHooks(ctx context.Context, ns, name string, rec record.EventRecorder, exec hooks.Executor) reconcile.Result {
+func reconcileBackupHooks(ctx context.Context, ns, name string, rec *fakeEventRecorder, exec hooks.Executor) reconcile.Result {
 	r := &PBSBackupReconciler{
 		Client:       k8sClient,
 		Scheme:       k8sClient.Scheme(),
@@ -370,7 +369,7 @@ var _ = Describe("PBSBackup Controller", func() {
 	It("1a. repo missing → Scheduled, warning event, requeue 1m, zero jobs", func() {
 		makeBackup(ctx, "bk-1a", "default", "no-such-repo", "whatever-pvc")
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileBackup(ctx, "default", "bk-1a", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -392,7 +391,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, repo)).To(Succeed())
 		makeBackup(ctx, "bk-1b", "default", "bk-1b-repo", "whatever-pvc")
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileBackup(ctx, "default", "bk-1b", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -406,7 +405,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-2-data", "default", "bk-2-pv")
 		makeBackup(ctx, "bk-2", "default", repo.Name, "bk-2-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		res := reconcileBackup(ctx, "default", "bk-2", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute)) // running poll fallback; Owns() drives the rest
@@ -482,7 +481,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-3-data", "default", "bk-3-pv")
 		makeBackup(ctx, "bk-3", "default", repo.Name, "bk-3-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackup(ctx, "default", "bk-3", rec)
 
 		setJobCondition(ctx, "default", "bk-3-node-a", batchv1.JobCondition{
@@ -511,7 +510,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-4-data", "default", "bk-4-pv")
 		makeBackup(ctx, "bk-4", "default", repo.Name, "bk-4-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackup(ctx, "default", "bk-4", rec)
 
 		setJobCondition(ctx, "default", "bk-4-node-a", batchv1.JobCondition{
@@ -541,7 +540,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makeMountingPod(ctx, "bk-5-app", "default", "node-b", "bk-5-data-b")
 		makeBackup(ctx, "bk-5", "default", repo.Name, "bk-5-data-a", "bk-5-data-b")
 
-		res := reconcileBackup(ctx, "default", "bk-5", record.NewFakeRecorder(32))
+		res := reconcileBackup(ctx, "default", "bk-5", newFakeEventRecorder(32))
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
 		b := fetchBackup(ctx, "default", "bk-5")
@@ -584,7 +583,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-6-data", "default", "bk-6-pv")
 		makeBackup(ctx, "bk-6", "default", repo.Name, "bk-6-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackup(ctx, "default", "bk-6", rec)
 		drainEvents(rec)
 
@@ -619,7 +618,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-7-data", "default", "bk-7-pv")
 		makeBackup(ctx, "bk-7", "default", repo.Name, "bk-7-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackup(ctx, "default", "bk-7", rec)
 		setJobCondition(ctx, "default", "bk-7-node-a", batchv1.JobCondition{
 			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
@@ -655,7 +654,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, b)).To(Succeed())
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileBackup(ctx, "bk-8", "bk-8", rec)
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
@@ -670,7 +669,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-9-data", "default", "") // pending
 		makeBackup(ctx, "bk-9", "default", "bk-9-repo", "bk-9-data")
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileBackup(ctx, "default", "bk-9", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -692,7 +691,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		}, src)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, src)).To(Succeed())
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileBackup(ctx, "default", "bk-10", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -718,7 +717,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		makePVC(ctx, "bk-11-data", "bk-11", "bk-11-pv")
 		makeBackup(ctx, "bk-11", "bk-11", repo.Name, "bk-11-data")
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackup(ctx, "bk-11", "bk-11", rec)
 
 		b := fetchBackup(ctx, "bk-11", "bk-11")
@@ -798,7 +797,7 @@ var _ = Describe("PBSBackup Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, b)).To(Succeed())
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		res := reconcileBackup(ctx, "bk-12", "bk-12", rec)
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute)) // Running poll fallback
@@ -839,7 +838,7 @@ var _ = Describe("PBSBackup metrics", func() {
 		makePVC(ctx, ns+"-data", ns, ns+"-pv")
 		makeBackup(ctx, name, ns, repo.Name, ns+"-data")
 
-		reconcileBackupWith(ctx, ns, name, record.NewFakeRecorder(16), m)
+		reconcileBackupWith(ctx, ns, name, newFakeEventRecorder(16), m)
 
 		// Back-date StartedAt: CompletedAt-StartedAt must land in the gauge.
 		b := fetchBackup(ctx, ns, name)
@@ -853,7 +852,7 @@ var _ = Describe("PBSBackup metrics", func() {
 		})
 		makeResultPod(ctx, ns, name+"-node-a",
 			`{"snapshotRef":"host/x/2026-09-16T10:00:00Z","bytes":1}`)
-		reconcileBackupWith(ctx, ns, name, record.NewFakeRecorder(16), m)
+		reconcileBackupWith(ctx, ns, name, newFakeEventRecorder(16), m)
 	}
 
 	It("success transition sets last_success and duration", func() {
@@ -879,11 +878,11 @@ var _ = Describe("PBSBackup metrics", func() {
 		makeLocalPV(ctx, "bk-m2-pv", "node-a")
 		makePVC(ctx, "bk-m2-data", "bk-m2", "bk-m2-pv")
 		makeBackup(ctx, "bk-m2", "bk-m2", repo.Name, "bk-m2-data")
-		reconcileBackupWith(ctx, "bk-m2", "bk-m2", record.NewFakeRecorder(16), m)
+		reconcileBackupWith(ctx, "bk-m2", "bk-m2", newFakeEventRecorder(16), m)
 		setJobCondition(ctx, "bk-m2", "bk-m2-node-a", batchv1.JobCondition{
 			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
 		})
-		reconcileBackupWith(ctx, "bk-m2", "bk-m2", record.NewFakeRecorder(16), m)
+		reconcileBackupWith(ctx, "bk-m2", "bk-m2", newFakeEventRecorder(16), m)
 
 		Expect(fetchBackup(ctx, "bk-m2", "bk-m2").Status.Phase).To(Equal(pbsv1.BackupPhaseFailed))
 		Expect(testutil.ToFloat64(m.Errors.WithLabelValues("bk-m2"))).To(Equal(1.0))
@@ -953,7 +952,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 			map[string]string{hooks.AnnotationCommand: `["sync"]`})
 
 		fake := &fakeExec{}
-		res := reconcileBackupHooks(ctx, "bk-h1", "bk-h1", record.NewFakeRecorder(32), fake)
+		res := reconcileBackupHooks(ctx, "bk-h1", "bk-h1", newFakeEventRecorder(32), fake)
 
 		Expect(fake.calls).To(Equal([]string{
 			"bk-h1/a-pod:app:sync", // alphabetical first, default container
@@ -965,7 +964,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 
 		// Re-reconcile (Jobs known): hooks never re-run.
 		fake.calls = nil
-		reconcileBackupHooks(ctx, "bk-h1", "bk-h1", record.NewFakeRecorder(32), fake)
+		reconcileBackupHooks(ctx, "bk-h1", "bk-h1", newFakeEventRecorder(32), fake)
 		Expect(fake.calls).To(BeEmpty())
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
 	})
@@ -975,7 +974,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 		makeHookedPod(ctx, "bk-h2-pod", "bk-h2", "bk-h2-data",
 			map[string]string{hooks.AnnotationCommand: dumpArgv, hooks.AnnotationContainer: "app"})
 
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		res := reconcileBackupWith(ctx, "bk-h2", "bk-h2", rec, nil)
 
 		Expect(res.RequeueAfter).To(BeZero()) // terminal, no requeue
@@ -998,7 +997,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 			map[string]string{hooks.AnnotationCommand: `["pg_dump", oops`, hooks.AnnotationContainer: "app"})
 
 		fake := &fakeExec{}
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		res := reconcileBackupHooks(ctx, "bk-h3", "bk-h3", rec, fake)
 
 		Expect(fake.calls).To(BeEmpty())
@@ -1025,7 +1024,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 			map[string]string{hooks.AnnotationCommand: `["boom"]`})
 
 		fake := &fakeExec{}
-		reconcileBackupHooks(ctx, "bk-h4", "bk-h4", record.NewFakeRecorder(32), fake)
+		reconcileBackupHooks(ctx, "bk-h4", "bk-h4", newFakeEventRecorder(32), fake)
 
 		Expect(fake.calls).To(BeEmpty())
 		b := fetchBackup(ctx, "bk-h4", "bk-h4")
@@ -1039,7 +1038,7 @@ var _ = Describe("PBSBackup pre-hooks", func() {
 			map[string]string{hooks.AnnotationCommand: dumpArgv})
 
 		fake := &fakeExec{err: fmt.Errorf("command terminated with exit code 1")}
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileBackupHooks(ctx, "bk-h5", "bk-h5", rec, fake)
 
 		b := fetchBackup(ctx, "bk-h5", "bk-h5")

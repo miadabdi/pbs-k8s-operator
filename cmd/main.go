@@ -193,7 +193,7 @@ func main() {
 	if err := (&controller.PBSRepoReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pbsrepo"),
+		Recorder: mgr.GetEventRecorder("pbsrepo"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsrepo")
 		os.Exit(1)
@@ -213,7 +213,7 @@ func main() {
 	if err := (&controller.PBSBackupReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorderFor("pbsbackup"),
+		Recorder:   mgr.GetEventRecorder("pbsbackup"),
 		AgentImage: agentImage,
 		Serializer: backuplib.NewSerializer(dynClient, discoClient),
 		// M3: backup phase transitions are exported on the manager's metrics
@@ -228,7 +228,7 @@ func main() {
 	if err := (&controller.PBSScheduleReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("pbsschedule"),
+		Recorder: mgr.GetEventRecorder("pbsschedule"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsschedule")
 		os.Exit(1)
@@ -236,7 +236,7 @@ func main() {
 	if err := (&controller.PBSRestoreReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorderFor("pbsrestore"),
+		Recorder:   mgr.GetEventRecorder("pbsrestore"),
 		AgentImage: agentImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsrestore")

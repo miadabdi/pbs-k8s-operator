@@ -28,8 +28,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
@@ -81,7 +81,24 @@ func credsKeys(tokenID, tokenSecret, fingerprint string) map[string][]byte {
 	}
 }
 
-func drainEvents(rec *record.FakeRecorder) []string {
+// fakeEventRecorder is record.NewFakeRecorder ported to the events.k8s.io
+// recorder interface (mgr.GetEventRecorder): one "<type> <reason> <note>"
+// string per event on the Events channel, drained by drainEvents.
+type fakeEventRecorder struct{ Events chan string }
+
+func newFakeEventRecorder(n int) *fakeEventRecorder {
+	return &fakeEventRecorder{Events: make(chan string, n)}
+}
+
+func (f *fakeEventRecorder) Eventf(_ runtime.Object, _ runtime.Object, eventtype, reason, _, note string, _ ...any) {
+	f.Events <- eventtype + " " + reason + " " + note
+}
+
+func (f *fakeEventRecorder) AnnotatedEventf(_ runtime.Object, _ runtime.Object, _ map[string]string, eventtype, reason, _, note string, _ ...any) {
+	f.Events <- eventtype + " " + reason + " " + note
+}
+
+func drainEvents(rec *fakeEventRecorder) []string {
 	var out []string
 	for {
 		select {
@@ -103,7 +120,7 @@ func readyCondition(ctx context.Context, name string) *metav1.Condition {
 	return meta.FindStatusCondition(fetchRepo(ctx, name).Status.Conditions, "Ready")
 }
 
-func doReconcile(ctx context.Context, name string, rec record.EventRecorder) reconcile.Result {
+func doReconcile(ctx context.Context, name string, rec *fakeEventRecorder) reconcile.Result {
 	r := &PBSRepoReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: rec}
 	result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
 	Expect(err).NotTo(HaveOccurred())
@@ -126,7 +143,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		Expect(k8sClient.Create(ctx, repo)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := doReconcile(ctx, repo.Name, rec)
 
 		Expect(res.RequeueAfter).To(Equal(2 * time.Minute))
@@ -149,7 +166,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		delete(secret, "tokenSecret")
 		createSecret(ctx, repo.Spec.SecretRef.Name, "default", secret)
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := doReconcile(ctx, repo.Name, rec)
 
 		Expect(res.RequeueAfter).To(Equal(2 * time.Minute))
@@ -168,7 +185,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
 		createSecret(ctx, repo.Spec.SecretRef.Name, "default", credsKeys(producerTokenID, producerTokenSecret, wrongFingerprint))
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := doReconcile(ctx, repo.Name, rec)
 
 		Expect(res.RequeueAfter).To(Equal(2 * time.Minute))
@@ -190,7 +207,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		// Secret carries the WRONG pin; the CR carries the right one.
 		createSecret(ctx, repo.Spec.SecretRef.Name, "default", credsKeys(producerTokenID, producerTokenSecret, wrongFingerprint))
 
-		res := doReconcile(ctx, repo.Name, record.NewFakeRecorder(16))
+		res := doReconcile(ctx, repo.Name, newFakeEventRecorder(16))
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
 		Expect(readyCondition(ctx, repo.Name).Reason).To(Equal("Reachable"))
@@ -209,7 +226,7 @@ var _ = Describe("PBSRepo Controller", func() {
 			map[string][]byte{"tokenID": []byte(bootstrapTokenID), "tokenSecret": []byte(bootstrapTokenSecret)})
 
 		before := time.Now()
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := doReconcile(ctx, repo.Name, rec)
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
@@ -237,7 +254,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
 		createSecret(ctx, repo.Spec.SecretRef.Name, "default", credsKeys(producerTokenID, producerTokenSecret, srv.Fingerprint()))
 
-		res := doReconcile(ctx, repo.Name, record.NewFakeRecorder(16))
+		res := doReconcile(ctx, repo.Name, newFakeEventRecorder(16))
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
 		Expect(readyCondition(ctx, repo.Name).Reason).To(Equal("Reachable"))
@@ -252,7 +269,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		Expect(k8sClient.Create(ctx, repo)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
 
-		rec := record.NewFakeRecorder(64)
+		rec := newFakeEventRecorder(64)
 		// 1st: secret absent → SecretMissing transition (event 1).
 		res := doReconcile(ctx, repo.Name, rec)
 		Expect(res.RequeueAfter).To(Equal(2 * time.Minute))
@@ -286,7 +303,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		createSecret(ctx, repo.Spec.BootstrapTokenRef.Name, "default",
 			map[string][]byte{"tokenID": []byte(bootstrapTokenID), "tokenSecret": []byte(bootstrapTokenSecret)})
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := doReconcile(ctx, repo.Name, rec)
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
@@ -308,7 +325,7 @@ var _ = Describe("PBSRepo Controller", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, fetchRepo(ctx, repo.Name))).To(Succeed()) })
 		createSecret(ctx, repo.Spec.SecretRef.Name, "pbs-operator-system", credsKeys(producerTokenID, producerTokenSecret, srv.Fingerprint()))
 
-		res := doReconcile(ctx, repo.Name, record.NewFakeRecorder(16))
+		res := doReconcile(ctx, repo.Name, newFakeEventRecorder(16))
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
 		Expect(readyCondition(ctx, repo.Name).Reason).To(Equal("Reachable"))

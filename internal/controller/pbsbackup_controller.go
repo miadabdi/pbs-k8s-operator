@@ -35,10 +35,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	// Aliased: the local variable "backup" in Reconcile shadows the package name.
@@ -79,7 +79,7 @@ const (
 type PBSBackupReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder recorder.EventRecorder
 
 	// AgentImage is the backup agent container image (--agent-image flag).
 	AgentImage string
@@ -160,6 +160,8 @@ func (r *PBSBackupReconciler) observeFailed(b *pbsv1.PBSBackup) {
 // before Jobs are created (secrets are namespace-scoped).
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=create;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// Events are emitted through the events.k8s.io/v1 recorder (mgr.GetEventRecorder).
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
 // M2: namespace API serialization reads every namespaced object type.
 // Accepted risk, stated explicitly: read-only get;list over ALL groups and
@@ -569,7 +571,7 @@ func (r *PBSBackupReconciler) hold(ctx context.Context, b *pbsv1.PBSBackup, reas
 		Type: condReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	}, nil)
 	if transitioned {
-		r.Recorder.Event(b, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(b, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -592,7 +594,7 @@ func (r *PBSBackupReconciler) runBackup(ctx context.Context, b *pbsv1.PBSBackup,
 		s.Jobs = jobStatuses(placed)
 	})
 	if transitioned {
-		r.Recorder.Event(b, corev1.EventTypeNormal, reasonRunning, "backup jobs are running")
+		r.Recorder.Eventf(b, nil, corev1.EventTypeNormal, reasonRunning, "", "backup jobs are running")
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -638,7 +640,7 @@ func (r *PBSBackupReconciler) completeBackup(ctx context.Context, b *pbsv1.PBSBa
 		}
 	})
 	if transitioned {
-		r.Recorder.Event(b, corev1.EventTypeNormal, reasonCompleted, message)
+		r.Recorder.Eventf(b, nil, corev1.EventTypeNormal, reasonCompleted, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -660,7 +662,7 @@ func (r *PBSBackupReconciler) failBackup(ctx context.Context, b *pbsv1.PBSBackup
 		}
 	})
 	if transitioned {
-		r.Recorder.Event(b, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(b, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err

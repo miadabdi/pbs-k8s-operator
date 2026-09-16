@@ -53,6 +53,22 @@ if ! skip vendor; then
 fi
 
 if ! skip kubespray; then
+  # Interrupted-run trap: if a previous up.sh died mid-kubespray, the nodes'
+  # /etc/resolv.conf may still point at the (gone) cluster DNS with a
+  # cluster.local search line while no apiserver answers — apt and DNS inside
+  # kubespray then hang or fail forever. When the artifacts kubeconfig exists
+  # but /readyz fails AND a node carries that search line, reset resolv.conf
+  # to the VirtualBox NAT resolver on both nodes before rerunning kubespray.
+  if [ -f artifacts/admin.conf ]; then
+    if ! KUBECONFIG="$PWD/artifacts/admin.conf" kubectl get --raw /readyz >/dev/null 2>&1; then
+      for node in k8s-ctl1 k8s-node1; do
+        if vagrant ssh "$node" -c 'grep -q cluster.local /etc/resolv.conf' 2>/dev/null; then
+          echo "stale cluster DNS on $node (no apiserver answers) — resetting resolv.conf to 10.0.2.3"
+          vagrant ssh "$node" -c 'sudo sh -c "printf \"nameserver 10.0.2.3\n\" > /etc/resolv.conf"'
+        fi
+      done
+    fi
+  fi
   step "5/8 kubespray cluster.yml (run from inside the clone so its ansible.cfg loads)"
   refresh_host_key 192.168.56.11
   refresh_host_key 192.168.56.12

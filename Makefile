@@ -188,7 +188,7 @@ testenv-up: ## Bring up the Vagrant-based test environment (testenv/scripts/up.s
 
 .PHONY: testenv-down
 testenv-down: ## Destroy the Vagrant-based test environment.
-	vagrant destroy -f
+	(cd testenv && vagrant destroy -f)
 
 ##@ Deployment
 

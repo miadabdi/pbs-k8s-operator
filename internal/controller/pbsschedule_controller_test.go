@@ -27,7 +27,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -52,7 +51,7 @@ func fetchSchedule(ctx context.Context, ns, name string) *pbsv1.PBSSchedule {
 }
 
 // reconcileSchedule runs one reconcile with the given clock seam.
-func reconcileSchedule(ctx context.Context, ns, name string, rec record.EventRecorder, now func() time.Time) reconcile.Result {
+func reconcileSchedule(ctx context.Context, ns, name string, rec *fakeEventRecorder, now func() time.Time) reconcile.Result {
 	r := &PBSScheduleReconciler{
 		Client:   k8sClient,
 		Scheme:   k8sClient.Scheme(),
@@ -118,7 +117,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		s.Spec.Schedule = "99 * * * *"
 		Expect(k8sClient.Update(ctx, s)).To(Succeed())
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileSchedule(ctx, "sched-1", "sched-1", rec, fixedClock(time.Now()))
 
 		Expect(res.RequeueAfter).To(Equal(5 * time.Minute))
@@ -140,7 +139,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		makeNamespace(ctx, "sched-2")
 		makeSchedule(ctx, "sched-2", "sched-2", hourly("no-such-repo"))
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileSchedule(ctx, "sched-2", "sched-2", rec, fixedClock(time.Now()))
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -159,7 +158,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		Expect(k8sClient.Status().Update(ctx, repo)).To(Succeed())
 		makeSchedule(ctx, "sched-2b", "sched-2b", hourly(repo.Name))
 
-		res := reconcileSchedule(ctx, "sched-2b", "sched-2b", record.NewFakeRecorder(16), fixedClock(time.Now()))
+		res := reconcileSchedule(ctx, "sched-2b", "sched-2b", newFakeEventRecorder(16), fixedClock(time.Now()))
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
 		_, reason := readyCondStatus(fetchSchedule(ctx, "sched-2b", "sched-2b").Status.Conditions)
@@ -174,7 +173,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		// Created "now": the next hourly slot is at most 60m out, so the
 		// 1m requeue cap applies.
 		now := time.Now().Truncate(time.Second)
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileSchedule(ctx, "sched-3", "sched-3", rec, fixedClock(now))
 
 		Expect(res.RequeueAfter).To(Equal(time.Minute))
@@ -197,7 +196,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		// Creation at T0; clock 90m later → the T0+60m slot is due.
 		t0 := s.CreationTimestamp.Time.Truncate(time.Second)
 		now := t0.Add(90 * time.Minute)
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		reconcileSchedule(ctx, "sched-4", "sched-4", rec, fixedClock(now))
 
 		created := scheduleBackups(ctx, fetchSchedule(ctx, "sched-4", "sched-4"))
@@ -237,7 +236,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 
 		t0 := s.CreationTimestamp.Time.Truncate(time.Second)
 		now := t0.Add(150 * time.Minute) // two hourly slots missed by then
-		reconcileSchedule(ctx, "sched-5", "sched-5", record.NewFakeRecorder(16), fixedClock(now))
+		reconcileSchedule(ctx, "sched-5", "sched-5", newFakeEventRecorder(16), fixedClock(now))
 
 		got := fetchSchedule(ctx, "sched-5", "sched-5")
 		Expect(scheduleBackups(ctx, got)).To(HaveLen(1))
@@ -257,8 +256,8 @@ var _ = Describe("PBSSchedule Controller", func() {
 
 		t0 := s.CreationTimestamp.Time.Truncate(time.Second)
 		now := t0.Add(90 * time.Minute)
-		reconcileSchedule(ctx, "sched-6", "sched-6", record.NewFakeRecorder(16), fixedClock(now))
-		reconcileSchedule(ctx, "sched-6", "sched-6", record.NewFakeRecorder(16), fixedClock(now.Add(time.Minute)))
+		reconcileSchedule(ctx, "sched-6", "sched-6", newFakeEventRecorder(16), fixedClock(now))
+		reconcileSchedule(ctx, "sched-6", "sched-6", newFakeEventRecorder(16), fixedClock(now.Add(time.Minute)))
 
 		Expect(scheduleBackups(ctx, fetchSchedule(ctx, "sched-6", "sched-6"))).To(HaveLen(1))
 	})
@@ -272,7 +271,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 
 		t0 := s.CreationTimestamp.Time.Truncate(time.Second)
 		now := t0.Add(90 * time.Minute)
-		reconcileSchedule(ctx, "sched-7", "sched-7", record.NewFakeRecorder(16), fixedClock(now))
+		reconcileSchedule(ctx, "sched-7", "sched-7", newFakeEventRecorder(16), fixedClock(now))
 
 		got := fetchSchedule(ctx, "sched-7", "sched-7")
 		Expect(scheduleBackups(ctx, got)).To(BeEmpty())
@@ -289,7 +288,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 
 		t0 := s.CreationTimestamp.Time.Truncate(time.Second)
 		now := t0.Add(90 * time.Minute)
-		reconcileSchedule(ctx, "sched-8", "sched-8", record.NewFakeRecorder(16), fixedClock(now))
+		reconcileSchedule(ctx, "sched-8", "sched-8", newFakeEventRecorder(16), fixedClock(now))
 		got := fetchSchedule(ctx, "sched-8", "sched-8")
 		Expect(got.Status.Active).To(HaveLen(1))
 
@@ -298,7 +297,7 @@ var _ = Describe("PBSSchedule Controller", func() {
 		created := scheduleBackups(ctx, got)
 		created[0].Status.Phase = pbsv1.BackupPhaseCompleted
 		Expect(k8sClient.Status().Update(ctx, &created[0])).To(Succeed())
-		reconcileSchedule(ctx, "sched-8", "sched-8", record.NewFakeRecorder(16), fixedClock(now))
+		reconcileSchedule(ctx, "sched-8", "sched-8", newFakeEventRecorder(16), fixedClock(now))
 
 		Expect(fetchSchedule(ctx, "sched-8", "sched-8").Status.Active).To(BeEmpty())
 	})

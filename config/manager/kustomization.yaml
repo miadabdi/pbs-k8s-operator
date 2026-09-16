@@ -1,2 +1,10 @@
 resources:
 - manager.yaml
+# Image pin kept in-tree so `make deploy` (default IMG=pbs-operator:dev) is
+# diff-free and idempotent; `make deploy IMG=...` rewrites these lines.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: controller
+  newName: pbs-operator
+  newTag: dev

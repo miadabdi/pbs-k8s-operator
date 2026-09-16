@@ -30,10 +30,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	"gitlab.sharifmind.ir/miad/pbs-operator/internal/pbs"
@@ -72,7 +72,7 @@ const (
 type PBSRepoReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder recorder.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
@@ -81,6 +81,8 @@ type PBSRepoReconciler struct {
 // secretRef may point at any namespace, so namespace-scoped RBAC cannot cover it.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// Events are emitted through the events.k8s.io/v1 recorder (mgr.GetEventRecorder).
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile moves a PBSRepo toward Ready=Reachable. See the constant block and
 // helpers for the exact conditions, events, and requeue cadences.
@@ -139,7 +141,7 @@ func (r *PBSRepoReconciler) fail(ctx context.Context, repo *pbsv1.PBSRepo, reaso
 		Message: message,
 	}, false)
 	if transitioned {
-		r.Recorder.Event(repo, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(repo, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -159,7 +161,7 @@ func (r *PBSRepoReconciler) succeed(ctx context.Context, repo *pbsv1.PBSRepo) (c
 		// and emit an event on every health requeue.
 	}, true)
 	if transitioned {
-		r.Recorder.Event(repo, corev1.EventTypeNormal, reasonReachable, "PBS server is reachable")
+		r.Recorder.Eventf(repo, nil, corev1.EventTypeNormal, reasonReachable, "", "PBS server is reachable")
 	}
 	if err != nil {
 		return ctrl.Result{}, err

@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -94,7 +93,7 @@ func fetchRestore(ctx context.Context, ns, name string) *pbsv1.PBSRestore {
 	return rs
 }
 
-func reconcileRestore(ctx context.Context, ns, name string, rec record.EventRecorder) reconcile.Result {
+func reconcileRestore(ctx context.Context, ns, name string, rec *fakeEventRecorder) reconcile.Result {
 	r := &PBSRestoreReconciler{
 		Client: k8sClient, Scheme: k8sClient.Scheme(),
 		Recorder: rec, AgentImage: "pbs-agent:dev",
@@ -137,7 +136,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		ns := "rs-happy"
 		repo := makeReadyRepo(ctx, "rs1-repo")
 		rs := makeRestore(ctx, "r1", ns, ns, repo.Name, []string{"Secret"}, []string{"Probe"})
-		rec := record.NewFakeRecorder(64)
+		rec := newFakeEventRecorder(64)
 
 		// StagingAPI: fetch Job created (ownerRef, argv), ns + SA + binding
 		// + repo secret copy provisioned.
@@ -255,7 +254,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		ns := "rs-fail"
 		repo := makeReadyRepo(ctx, "rs2-repo")
 		rs := makeRestore(ctx, "r2", ns, ns, repo.Name, nil, nil)
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 
 		reconcileRestore(ctx, ns, "r2", rec)
 		setJobCondition(ctx, ns, "r2-api-fetch", batchv1.JobCondition{
@@ -288,7 +287,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		ns := "rs-term"
 		repo := makeReadyRepo(ctx, "rs3-repo")
 		makeRestore(ctx, "r3", ns, ns, repo.Name, nil, nil)
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileRestore(ctx, ns, "r3", rec)
 		setJobCondition(ctx, ns, "r3-api-fetch", batchv1.JobCondition{
 			Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
@@ -325,7 +324,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, rs)).To(Succeed())
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileRestore(ctx, ns, "r4", rec)
 
 		Expect(res.RequeueAfter).To(BeZero())
@@ -347,7 +346,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		ns := "rs5"
 		makeRestore(ctx, "r5", ns, ns, repo.Name, nil, nil)
 
-		rec := record.NewFakeRecorder(16)
+		rec := newFakeEventRecorder(16)
 		res := reconcileRestore(ctx, ns, "r5", rec)
 
 		Expect(res.RequeueAfter).To(Equal(requeueWait))
@@ -369,7 +368,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		makeNamespace(ctx, ns)
 		repo := makeReadyRepo(ctx, "rs7-repo")
 		rs := makeRestore(ctx, "r7", ns, ns, repo.Name, nil, nil)
-		rec := record.NewFakeRecorder(32)
+		rec := newFakeEventRecorder(32)
 		reconcileRestore(ctx, ns, "r7", rec)
 		setJobCondition(ctx, ns, "r7-api-fetch", batchv1.JobCondition{
 			Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
@@ -408,7 +407,7 @@ var _ = Describe("PBSRestore Controller", func() {
 		repo := makeReadyRepo(ctx, "rs6-repo")
 		makeRestore(ctx, "r6", "default", "rs6-target", repo.Name, nil, nil)
 
-		res := reconcileRestore(ctx, "default", "r6", record.NewFakeRecorder(16))
+		res := reconcileRestore(ctx, "default", "r6", newFakeEventRecorder(16))
 
 		Expect(res.RequeueAfter).To(Equal(requeueWait))
 		fetch := restoreJob(ctx, "rs6-target", "r6-api-fetch")

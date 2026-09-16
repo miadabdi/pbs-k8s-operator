@@ -32,10 +32,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
@@ -80,7 +80,7 @@ const (
 type PBSRestoreReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder recorder.EventRecorder
 
 	// AgentImage is the restore agent container image (--agent-image flag).
 	AgentImage string
@@ -103,6 +103,8 @@ type PBSRestoreReconciler struct {
 // volume restore Jobs.
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// Events are emitted through the events.k8s.io/v1 recorder (mgr.GetEventRecorder).
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Fallback node for PVCs no workload pins (alphabetically first).
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
@@ -652,7 +654,7 @@ func (r *PBSRestoreReconciler) holdRestore(ctx context.Context, rs *pbsv1.PBSRes
 		Type: condReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	}, nil)
 	if transitioned {
-		r.Recorder.Event(rs, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(rs, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -683,7 +685,7 @@ func (r *PBSRestoreReconciler) completeRestore(ctx context.Context, rs *pbsv1.PB
 		}
 	})
 	if transitioned {
-		r.Recorder.Event(rs, corev1.EventTypeNormal, reasonCompleted, message)
+		r.Recorder.Eventf(rs, nil, corev1.EventTypeNormal, reasonCompleted, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -704,7 +706,7 @@ func (r *PBSRestoreReconciler) failRestore(ctx context.Context, rs *pbsv1.PBSRes
 		}
 	})
 	if transitioned {
-		r.Recorder.Event(rs, corev1.EventTypeWarning, reason, message)
+		r.Recorder.Eventf(rs, nil, corev1.EventTypeWarning, reason, "", message)
 	}
 	if err != nil {
 		return ctrl.Result{}, err
