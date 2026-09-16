@@ -176,15 +176,20 @@ func materializeKeyfile(content string) (path string, cleanup func(), err error)
 }
 
 // parseSnapshotList decodes the client's `snapshot list --output-format json`
-// output, which wraps the records in a {"data":[...]} envelope.
+// output. The CLI prints a bare top-level array (live-verified); the
+// {"data":[...]} envelope is the REST API shape — accept both.
 func parseSnapshotList(data []byte) ([]pbs.Snapshot, error) {
 	var out struct {
 		Data []pbs.Snapshot `json:"data"`
 	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
+	if err := json.Unmarshal(data, &out); err == nil {
+		return out.Data, nil
 	}
-	return out.Data, nil
+	var snaps []pbs.Snapshot
+	if err := json.Unmarshal(data, &snaps); err != nil {
+		return nil, fmt.Errorf("decode: not an envelope or bare array: %w", err)
+	}
+	return snaps, nil
 }
 
 // latestHostSnapshot picks the newest snapshot of the "host" group with the

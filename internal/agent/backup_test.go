@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"gitlab.sharifmind.ir/miad/pbs-operator/internal/pbs"
 )
 
 // fakeRunner scripts the proxmox-backup-client exec seam: one call per entry.
@@ -77,12 +79,17 @@ func deps(run func(argv, env []string, stdout, stderr io.Writer) error) BackupDe
 
 // Snapshot-list fixture: two host/bk-1 snapshots (older first), one decoy id,
 // one decoy type. Latest host/bk-1 is 1747401600 size 4096.
-const snapshotListFixture = `{"data":[
+const snapshotRecords = `[
   {"backup-type":"host","backup-id":"bk-1","backup-time":1747315200.0,"size":1234},
   {"backup-type":"host","backup-id":"bk-1","backup-time":1747401600.0,"size":4096},
   {"backup-type":"host","backup-id":"other","backup-time":1747488000.0,"size":99},
   {"backup-type":"ct","backup-id":"bk-1","backup-time":1750000000.0,"size":7}
-]}`
+]`
+
+// The CLI prints a BARE top-level array (live-verified against
+// proxmox-backup-client 4.x); the {"data":[...]} envelope is the REST API
+// shape. parseSnapshotList must accept both.
+const snapshotListFixture = `{"data":` + snapshotRecords + `}`
 
 // Bullet 1: env -> PBS_REPOSITORY composition (tokenID's @ and ! stay literal).
 func TestClientEnv(t *testing.T) {
@@ -126,12 +133,24 @@ func TestListArgv(t *testing.T) {
 
 // Bullet 3: snapshot-pick from fixture snapshot-list JSON -> correct ref + bytes.
 func TestPickSnapshot(t *testing.T) {
-	snaps, err := parseSnapshotList([]byte(snapshotListFixture))
-	if err != nil {
-		t.Fatalf("parseSnapshotList: %v", err)
+	// Both shapes decode to the same records: bare array (what the CLI
+	// actually prints) and {"data":[...]} envelope (REST API shape).
+	for name, fixture := range map[string]string{
+		"bare array": snapshotRecords,
+		"envelope":   snapshotListFixture,
+	} {
+		snaps, err := parseSnapshotList([]byte(fixture))
+		if err != nil {
+			t.Fatalf("%s: parseSnapshotList: %v", name, err)
+		}
+		assertPicked(t, name, snaps)
 	}
+}
+
+func assertPicked(t *testing.T, name string, snaps []pbs.Snapshot) {
+	t.Helper()
 	if len(snaps) != 4 {
-		t.Fatalf("parsed %d snapshots, want 4", len(snaps))
+		t.Fatalf("%s: parsed %d snapshots, want 4", name, len(snaps))
 	}
 	snap, err := latestHostSnapshot(snaps, "bk-1")
 	if err != nil {
