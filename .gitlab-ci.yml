@@ -7,8 +7,6 @@
 # NEXUS_CI_TOKEN CI/CD variables (group-level; no secrets in-repo).
 image: docker:27-cli
 
-tags: [ai]
-
 stages: [build]
 
 variables:
@@ -26,12 +24,14 @@ variables:
   #    cannot re-push its :main).
 
 default:
+  tags: [ai] # prod fleet runners
   retry: 2 # 3 attempts total (GitLab caps automatic retries at 2)
 
 .docker: &docker
   stage: build
   before_script:
-    - docker login "$REGISTRY" -u "$NEXUS_CI_USER" -p "$NEXUS_CI_TOKEN"
+    # --password-stdin keeps the token out of argv (process listings).
+    - echo "$NEXUS_CI_TOKEN" | docker login "$REGISTRY" -u "$NEXUS_CI_USER" --password-stdin
 
 build-operator:
   <<: *docker
@@ -40,7 +40,12 @@ build-operator:
     - changes:
         - cmd/main.go
         - api/
-        - internal/
+        # Manager imports (cmd/main.go dep graph); internal/agent is NOT one
+        # — agent-only changes must not rebuild the operator image.
+        - internal/backup/
+        - internal/controller/
+        - internal/hooks/
+        - internal/pbs/
         - go.mod
         - go.sum
         - Dockerfile

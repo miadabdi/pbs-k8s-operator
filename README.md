@@ -249,12 +249,12 @@ is the complete inventory (count matches `grep -rn "ponytail:" --include="*.go"
 | Location | Ceiling | Upgrade path |
 |---|---|---|
 | `internal/controller/pbsschedule_controller.go:117` | Catch-up iterates one `Next()` per missed slot (a `*/1` cron stale for a year = ~525k cheap calls, once) | Chunked time advancement if it ever matters |
-| `internal/controller/pbsbackup_controller.go:266` | API-only backups run on the alphabetically first node; a NotReady/cordoned first node stalls the backup | Filter on Ready |
-| `internal/controller/pbsbackup_controller.go:391` | A crash between hook exec and the status write re-execs hooks once on the next reconcile | Per-backup hook-run bookkeeping |
-| `internal/controller/pbsbackup_controller.go:443` | Several backups to one repo in one ns share the copied secret `pbsrepo-<repo>`; the first backup owns it and it GCs with THAT CR | Per-backup copies |
-| `internal/controller/pbsbackup_controller.go:508` | The staged `api.yaml` rides a ConfigMap (1 MiB cap) | Agent-side serialization with a read-only Job SA |
-| `internal/controller/pbsbackup_controller.go:605` | Multi-node backups keep per-Job refs in `status.Jobs[].State` (`"ok:<ref>"`); `status.SnapshotRef` is set only for single-node | Aggregate after live multi-node runs |
-| `internal/controller/pbsrestore_controller.go:229` | An api.yaml with no PVCs skips the volume phase entirely — an empty/mis-serialized plan can Complete with nothing restored | Cross-check the snapshot's `pvc-*` archives |
+| `internal/controller/pbsbackup_controller.go:268` | API-only backups run on the alphabetically first node; a NotReady/cordoned first node stalls the backup | Filter on Ready |
+| `internal/controller/pbsbackup_controller.go:393` | A crash between hook exec and the status write re-execs hooks once on the next reconcile | Per-backup hook-run bookkeeping |
+| `internal/controller/pbsbackup_controller.go:445` | Several backups to one repo in one ns share the copied secret `pbsrepo-<repo>`; the first backup owns it and it GCs with THAT CR | Per-backup copies |
+| `internal/controller/pbsbackup_controller.go:510` | The staged `api.yaml` rides a ConfigMap (1 MiB cap) | Agent-side serialization with a read-only Job SA |
+| `internal/controller/pbsbackup_controller.go:607` | Multi-node backups keep per-Job refs in `status.Jobs[].State` (`"ok:<ref>"`); `status.SnapshotRef` is set only for single-node | Aggregate after live multi-node runs |
+| `internal/controller/pbsrestore_controller.go:231` | An api.yaml with no PVCs skips the volume phase entirely — an empty/mis-serialized plan can Complete with nothing restored | Cross-check the snapshot's `pvc-*` archives |
 | `internal/backup/serialize.go:73` | One discovery round-trip per backup (no cache) | Cached discovery client if reconcile frequency makes it hot |
 | `internal/backup/restore_plan.go:209` | Restore-side node pinning reads only pod-template `nodeSelector`s; affinity/topology-spread workloads fall back to the first node | Extend `NodeForPVC` if those workloads matter |
 
