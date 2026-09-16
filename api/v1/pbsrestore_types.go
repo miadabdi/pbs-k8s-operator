@@ -21,48 +21,100 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// RestorePhase enumerates the lifecycle phases of a PBSRestore.
+// +kubebuilder:validation:Enum=New;StagingAPI;RestoringVolumes;ApplyingWorkloads;Completed;Failed
+type RestorePhase string
 
-// PBSRestoreSpec defines the desired state of PBSRestore
+const (
+	// RestorePhaseNew is the phase of a restore that has not started yet.
+	RestorePhaseNew RestorePhase = "New"
+	// RestorePhaseStagingAPI covers the fetch Job (api.pxar.didx → ConfigMap)
+	// and the pre apply Job (namespaces/CRDs/PVCs/secrets/...).
+	RestorePhaseStagingAPI RestorePhase = "StagingAPI"
+	// RestorePhaseRestoringVolumes is the phase of the per-node volume data
+	// restore Jobs (the WFFC consumers that bind the restored PVCs).
+	RestorePhaseRestoringVolumes RestorePhase = "RestoringVolumes"
+	// RestorePhaseApplyingWorkloads is the phase of the workload apply Job
+	// (pods land, consuming the restored volumes).
+	RestorePhaseApplyingWorkloads RestorePhase = "ApplyingWorkloads"
+	// RestorePhaseCompleted is the phase of a successfully finished restore.
+	RestorePhaseCompleted RestorePhase = "Completed"
+	// RestorePhaseFailed is the phase of a failed restore.
+	RestorePhaseFailed RestorePhase = "Failed"
+)
+
+// PBSRestoreSpec defines the desired state of PBSRestore.
 type PBSRestoreSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// repoRef is the name of the PBSRepo (cluster-scoped) to restore from.
+	RepoRef string `json:"repoRef"`
 
-	// foo is an example field of PBSRestore. Edit pbsrestore_types.go to remove/update
+	// snapshotRef is the PBS snapshot to restore, "host/<id>/<ISO8601Z>"
+	// (from a PBSBackup's status or `snapshot list`).
+	SnapshotRef string `json:"snapshotRef"`
+
+	// targetNamespace receives the restored API objects and volumes; it is
+	// created if missing. Jobs run there (PVC mounts and the api ConfigMap
+	// are namespace-local), so in the common case the PBSRestore itself
+	// lives in the target namespace.
+	TargetNamespace string `json:"targetNamespace"`
+
+	// dropKinds lists Kinds excluded from BOTH api apply phases (exact Kind
+	// names, e.g. ["Secret","Probe"]).
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	DropKinds []string `json:"dropKinds,omitempty"`
+
+	// keepKinds lists Kinds exempt from dropKinds (Keep wins over Drop when
+	// both name the same Kind). Keep alone does not restrict — it is an
+	// exception list, not a whitelist.
+	// +optional
+	KeepKinds []string `json:"keepKinds,omitempty"`
+}
+
+// RestoreJobStatus reports one restore Job.
+type RestoreJobStatus struct {
+	// phase is the restore phase the Job belongs to.
+	Phase string `json:"phase"`
+
+	// job is the name of the k8s Job.
+	Job string `json:"job"`
+
+	// state is a raw summary of the Job's latest condition.
+	State string `json:"state"`
 }
 
 // PBSRestoreStatus defines the observed state of PBSRestore.
 type PBSRestoreStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// phase is the current lifecycle phase of the restore.
+	// +kubebuilder:default=New
+	// +optional
+	Phase RestorePhase `json:"phase,omitempty"`
 
 	// conditions represent the current state of the PBSRestore resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// startedAt is when the first restore Job was created.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// completedAt is when the restore reached a terminal phase.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// jobs holds one RestoreJobStatus per launched Job.
+	// +optional
+	Jobs []RestoreJobStatus `json:"jobs,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.spec.snapshotRef`
+// +kubebuilder:printcolumn:name="Started",type=date,JSONPath=`.status.startedAt`
 
-// PBSRestore is the Schema for the pbsrestores API
+// PBSRestore is the Schema for the pbsrestores API.
 type PBSRestore struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -81,7 +133,7 @@ type PBSRestore struct {
 
 // +kubebuilder:object:root=true
 
-// PBSRestoreList contains a list of PBSRestore
+// PBSRestoreList contains a list of PBSRestore.
 type PBSRestoreList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

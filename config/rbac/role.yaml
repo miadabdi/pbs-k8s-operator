@@ -8,9 +8,11 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   verbs:
   - create
   - get
+  - list
   - update
   - watch
 - apiGroups:
@@ -20,6 +22,16 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -37,16 +49,6 @@ rules:
   - pods/exec
   verbs:
   - create
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
 - apiGroups:
   - '*'
   resources:
@@ -113,3 +115,20 @@ rules:
   - pbsschedules/finalizers
   verbs:
   - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - pbs-operator-pbs-restore
+  resources:
+  - clusterroles
+  verbs:
+  - bind

@@ -15,8 +15,9 @@ limitations under the License.
 */
 
 // pbs-agent is the entrypoint of the backup/restore Jobs created by the
-// pbs-operator. The backup subcommand wraps proxmox-backup-client (logic in
-// internal/agent); restore arrives in a later milestone.
+// pbs-operator. The backup and restore-volume subcommands wrap
+// proxmox-backup-client; apply-manifests shells out to kubectl (logic in
+// internal/agent).
 package main
 
 import (
@@ -28,7 +29,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: pbs-agent <backup|restore> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: pbs-agent <backup|restore-volume|apply-manifests> [args...]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -46,11 +47,33 @@ func main() {
 			Stderr:   os.Stderr,
 			Run:      agent.ExecClient,
 		}, pvcs, apiDir, notes, termlog))
-	case "restore":
-		fmt.Fprintln(os.Stderr, "pbs-agent restore: not implemented")
-		os.Exit(2)
+	case "restore-volume":
+		ref, pairs, cm, termlog, err := agent.ParseRestoreVolumeArgs(os.Args[2:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pbs-agent:", err)
+			os.Exit(2)
+		}
+		os.Exit(agent.RunRestoreVolume(agent.RestoreDeps{
+			Getenv:  os.Getenv,
+			Environ: os.Environ,
+			Stdout:  os.Stdout,
+			Stderr:  os.Stderr,
+			Run:     agent.ExecClient,
+		}, ref, pairs, cm, termlog))
+	case "apply-manifests":
+		phase, file, drop, keep, termlog, err := agent.ParseApplyArgs(os.Args[2:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pbs-agent:", err)
+			os.Exit(2)
+		}
+		os.Exit(agent.RunApplyManifests(agent.ApplyDeps{
+			PodNS:  agent.DefaultPodNS,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+			Run:    agent.ExecClient,
+		}, phase, file, drop, keep, termlog))
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected backup or restore)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected backup, restore-volume or apply-manifests)\n", os.Args[1])
 		os.Exit(2)
 	}
 }

@@ -542,21 +542,9 @@ func (r *PBSBackupReconciler) ensureStagingConfigMap(ctx context.Context, b *pbs
 }
 
 // firstNode returns the alphabetically first node name in the cluster, or ""
-// when no Node objects exist.
+// when no Node objects exist (shared by the backup and restore reconcilers).
 func (r *PBSBackupReconciler) firstNode(ctx context.Context) (string, error) {
-	nodes := &corev1.NodeList{}
-	if err := r.List(ctx, nodes); err != nil {
-		return "", err
-	}
-	if len(nodes.Items) == 0 {
-		return "", nil
-	}
-	names := make([]string, 0, len(nodes.Items))
-	for i := range nodes.Items {
-		names = append(names, nodes.Items[i].Name)
-	}
-	sort.Strings(names)
-	return names[0], nil
+	return firstNode(ctx, r.Client)
 }
 
 // contractEqual compares two secret payloads on the repo contract keys only.
@@ -859,4 +847,23 @@ func (r *PBSBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Named("pbsbackup").
 		Complete(r)
+}
+
+// firstNode lists the cluster's nodes and returns the alphabetically first
+// name, "" when none exist. Package-level: both reconcilers use it as the
+// deterministic default placement.
+func firstNode(ctx context.Context, c client.Client) (string, error) {
+	nodes := &corev1.NodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return "", err
+	}
+	if len(nodes.Items) == 0 {
+		return "", nil
+	}
+	names := make([]string, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		names = append(names, nodes.Items[i].Name)
+	}
+	sort.Strings(names)
+	return names[0], nil
 }

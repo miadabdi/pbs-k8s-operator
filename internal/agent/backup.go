@@ -266,9 +266,10 @@ func writeTermlog(path, jsonLine string, stderr io.Writer) {
 	}
 }
 
-// exitCode maps a client error to its exit code, falling back to 1.
+// exitCode maps a client error to its exit code, falling back to 1. Probes
+// the ExitCode() interface so *exec.ExitError and test fakes both match.
 func exitCode(err error) int {
-	var ee *exec.ExitError
+	var ee interface{ ExitCode() int }
 	if errors.As(err, &ee) {
 		if code := ee.ExitCode(); code >= 0 {
 			return code

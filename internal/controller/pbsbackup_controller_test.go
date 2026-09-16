@@ -237,9 +237,12 @@ func makeNamespace(ctx context.Context, name string) {
 }
 
 // makeNode creates a Node object (envtest ships none) so node-pinned Jobs
-// have something to be pinned to.
+// have something to be pinned to. Idempotent: specs share node names.
 func makeNode(ctx context.Context, name string) {
 	err := k8sClient.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	if apierrors.IsAlreadyExists(err) {
+		return
+	}
 	Expect(err).NotTo(HaveOccurred(), "create node "+name)
 }
 

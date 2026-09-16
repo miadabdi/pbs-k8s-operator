@@ -30,10 +30,13 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
@@ -449,4 +452,115 @@ func head(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// Scenario 12 (M5 GATE): byte-identical restore. A fresh pg backup (whose
+// namespace carries a Probe CR) restores into a scratch target namespace:
+// API objects reappear (Probe CR present), the PVC rebinds via the WFFC
+// volume Job, pg comes Running, and a checksum Job proves the volume data
+// byte-identical (probe.sha256 written at seed time, verified from the
+// restored volume; dump.pgc present). A SECOND restore into the SAME
+// namespace also Completes — the empty-first rule and re-apply over live
+// state. Target ns is per-run: e2e reruns never fight stale restores.
+func TestRestoreIntoFreshNamespace(t *testing.T) {
+	requireEnv(t)
+
+	// CRD coverage: a Probe CR rides the backup's api.yaml.
+	probeName := fmt.Sprintf("e2e-probe-%d", runID)
+	probeMsg := fmt.Sprintf("restore-me-%d", runID)
+	newProbeCR(t, pgNS, probeName, probeMsg)
+
+	// Snapshot source: one fresh, hooked pg backup (dump.pgc refreshed).
+	backup := fmt.Sprintf("pg-e2e-restore-%d", runID)
+	newBackup(t, pgNS, backup, repoName, nil)
+	b := assertHappyBackup(t, pgNS, backup, pgNode, true) // gate-quality source
+
+	// Target namespace; the PBSRestore lives in it (ownerRefs, CM, mounts).
+	target := fmt.Sprintf("restore-test-%d", runID)
+	nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: target, Labels: map[string]string{suiteLabel: "true"}}}
+	if err := k8s.Create(ctx, nsObj); err != nil {
+		t.Fatalf("create namespace %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, nsObj) })
+
+	restore1 := fmt.Sprintf("e2e-restore-%d", runID)
+	newRestore(t, target, restore1, b.Status.SnapshotRef)
+	if r := waitForRestoreTerminal(t, target, restore1, 3*time.Minute); r.Status.Phase != pbsv1.RestorePhaseCompleted {
+		t.Fatalf("restore %s phase %s, want Completed (Ready: %s)", restore1, r.Status.Phase, restoreHoldMessage(r))
+	}
+
+	// API objects: the Probe CR is back with its payload.
+	if got := probeCRMessage(t, target, probeName); got != probeMsg {
+		t.Fatalf("Probe %s/%s message %q, want %q", target, probeName, got, probeMsg)
+	}
+	// PVC: re-created by the pre apply, bound by the volume Job's node pin.
+	eventually(t, 60*time.Second, "PVC data-pg-0 to be Bound", func() error {
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := k8s.Get(ctx, types.NamespacedName{Namespace: target, Name: "data-pg-0"}, pvc); err != nil {
+			return err
+		}
+		if pvc.Status.Phase != corev1.ClaimBound {
+			return fmt.Errorf("PVC phase %s", pvc.Status.Phase)
+		}
+		return nil
+	})
+	// Workload: the pg StatefulSet comes back and its pod is ready.
+	eventually(t, 120*time.Second, "restored pg StatefulSet ready", func() error {
+		sts := &appsv1.StatefulSet{}
+		if err := k8s.Get(ctx, types.NamespacedName{Namespace: target, Name: "pg"}, sts); err != nil {
+			return err
+		}
+		if sts.Status.ReadyReplicas != 1 {
+			return fmt.Errorf("ready replicas %d/%d", sts.Status.ReadyReplicas, *sts.Spec.Replicas)
+		}
+		return nil
+	})
+
+	// Byte-identical gate: verify probe.bin against probe.sha256 FROM INSIDE
+	// the restored volume, and dump.pgc present.
+	checksum := fmt.Sprintf("e2e-checksum-%d", runID)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: checksum, Namespace: target,
+			Labels: map[string]string{suiteLabel: "true", "e2e-verify": checksum},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: ptr.To[int32](0),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"e2e-verify": checksum}},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					// Same node as the PVC (RWO local-path).
+					NodeSelector: map[string]string{"kubernetes.io/hostname": pgNode},
+					Containers: []corev1.Container{{
+						Name:    "checksum",
+						Image:   "busybox:1.37",
+						Command: []string{"sh", "-c", "cd /data && sha256sum -c probe.sha256 && test -s dump.pgc"},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: "data", MountPath: "/data",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data-pg-0"},
+						},
+					}},
+				},
+			},
+		},
+	}
+	if err := k8s.Create(ctx, job); err != nil {
+		t.Fatalf("create checksum job: %v", err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, job) })
+	waitJobComplete(t, target, checksum, 2*time.Minute)
+
+	// Double restore into the SAME namespace → also Completed (empty-first
+	// over live data, idempotent re-apply of API objects).
+	restore2 := restore1 + "-again"
+	newRestore(t, target, restore2, b.Status.SnapshotRef)
+	if r := waitForRestoreTerminal(t, target, restore2, 3*time.Minute); r.Status.Phase != pbsv1.RestorePhaseCompleted {
+		t.Fatalf("second restore %s phase %s, want Completed (Ready: %s)", restore2, r.Status.Phase, restoreHoldMessage(r))
+	}
 }

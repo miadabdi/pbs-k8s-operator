@@ -14,10 +14,20 @@ spec:
     singular: pbsrestore
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.snapshotRef
+      name: Snapshot
+      type: string
+    - jsonPath: .status.startedAt
+      name: Started
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
-        description: PBSRestore is the Schema for the pbsrestores API
+        description: PBSRestore is the Schema for the pbsrestores API.
         properties:
           apiVersion:
             description: |-
@@ -39,25 +49,52 @@ spec:
           spec:
             description: spec defines the desired state of PBSRestore
             properties:
-              foo:
-                description: foo is an example field of PBSRestore. Edit pbsrestore_types.go
-                  to remove/update
+              dropKinds:
+                description: |-
+                  dropKinds lists Kinds excluded from BOTH api apply phases (exact Kind
+                  names, e.g. ["Secret","Probe"]).
+                items:
+                  type: string
+                type: array
+              keepKinds:
+                description: |-
+                  keepKinds lists Kinds exempt from dropKinds (Keep wins over Drop when
+                  both name the same Kind). Keep alone does not restrict — it is an
+                  exception list, not a whitelist.
+                items:
+                  type: string
+                type: array
+              repoRef:
+                description: repoRef is the name of the PBSRepo (cluster-scoped) to
+                  restore from.
                 type: string
+              snapshotRef:
+                description: |-
+                  snapshotRef is the PBS snapshot to restore, "host/<id>/<ISO8601Z>"
+                  (from a PBSBackup's status or `snapshot list`).
+                type: string
+              targetNamespace:
+                description: |-
+                  targetNamespace receives the restored API objects and volumes; it is
+                  created if missing. Jobs run there (PVC mounts and the api ConfigMap
+                  are namespace-local), so in the common case the PBSRestore itself
+                  lives in the target namespace.
+                type: string
+            required:
+            - repoRef
+            - snapshotRef
+            - targetNamespace
             type: object
           status:
             description: status defines the observed state of PBSRestore
             properties:
+              completedAt:
+                description: completedAt is when the restore reached a terminal phase.
+                format: date-time
+                type: string
               conditions:
-                description: |-
-                  conditions represent the current state of the PBSRestore resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                description: conditions represent the current state of the PBSRestore
+                  resource.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +153,41 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              jobs:
+                description: jobs holds one RestoreJobStatus per launched Job.
+                items:
+                  description: RestoreJobStatus reports one restore Job.
+                  properties:
+                    job:
+                      description: job is the name of the k8s Job.
+                      type: string
+                    phase:
+                      description: phase is the restore phase the Job belongs to.
+                      type: string
+                    state:
+                      description: state is a raw summary of the Job's latest condition.
+                      type: string
+                  required:
+                  - job
+                  - phase
+                  - state
+                  type: object
+                type: array
+              phase:
+                default: New
+                description: phase is the current lifecycle phase of the restore.
+                enum:
+                - New
+                - StagingAPI
+                - RestoringVolumes
+                - ApplyingWorkloads
+                - Completed
+                - Failed
+                type: string
+              startedAt:
+                description: startedAt is when the first restore Job was created.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

@@ -42,7 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -114,6 +116,12 @@ func sweep() {
 	if err := k8s.List(sctx, schedules, client.MatchingLabels{suiteLabel: "true"}); err == nil {
 		for i := range schedules.Items {
 			_ = k8s.Delete(sctx, &schedules.Items[i])
+		}
+	}
+	restores := &pbsv1.PBSRestoreList{}
+	if err := k8s.List(sctx, restores, client.MatchingLabels{suiteLabel: "true"}); err == nil {
+		for i := range restores.Items {
+			_ = k8s.Delete(sctx, &restores.Items[i])
 		}
 	}
 }
@@ -231,6 +239,89 @@ func newSchedule(t *testing.T, ns, name, repoRef, cronSpec string, tmpl pbsv1.PB
 			}
 		}
 	})
+}
+
+// newRestore creates a suite-owned PBSRestore in ns (the TARGET namespace —
+// Jobs, ownerRefs and the api ConfigMap are namespace-local) restoring ref.
+func newRestore(t *testing.T, ns, name, snapshotRef string) {
+	t.Helper()
+	rs := &pbsv1.PBSRestore{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{suiteLabel: "true"}},
+		Spec: pbsv1.PBSRestoreSpec{
+			RepoRef:         repoName,
+			SnapshotRef:     snapshotRef,
+			TargetNamespace: ns,
+		},
+	}
+	if err := k8s.Create(ctx, rs); err != nil {
+		t.Fatalf("create PBSRestore %s/%s: %v", ns, name, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, rs) })
+}
+
+// getRestore fetches the current state of a PBSRestore.
+func getRestore(t *testing.T, ns, name string) pbsv1.PBSRestore {
+	t.Helper()
+	var rs pbsv1.PBSRestore
+	if err := k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &rs); err != nil {
+		t.Fatalf("get PBSRestore %s/%s: %v", ns, name, err)
+	}
+	return rs
+}
+
+// waitForRestoreTerminal waits for phase Completed or Failed.
+func waitForRestoreTerminal(t *testing.T, ns, name string, timeout time.Duration) pbsv1.PBSRestore {
+	t.Helper()
+	var out pbsv1.PBSRestore
+	eventually(t, timeout, "PBSRestore "+ns+"/"+name+" to reach a terminal phase", func() error {
+		if err := k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &out); err != nil {
+			return err
+		}
+		if out.Status.Phase != pbsv1.RestorePhaseCompleted && out.Status.Phase != pbsv1.RestorePhaseFailed {
+			return fmt.Errorf("phase %q: %s", out.Status.Phase, restoreHoldMessage(out))
+		}
+		return nil
+	})
+	return out
+}
+
+// restoreHoldMessage surfaces the Ready condition message to shorten debugging.
+func restoreHoldMessage(rs pbsv1.PBSRestore) string {
+	if c := meta.FindStatusCondition(rs.Status.Conditions, readyCond); c != nil {
+		return c.Message
+	}
+	return ""
+}
+
+// newProbeCR creates a suite-owned Probe custom resource in ns (CRD coverage
+// for backup serialization and restore apply).
+func newProbeCR(t *testing.T, ns, name, message string) {
+	t.Helper()
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "examples.sharifmind.ir/v1",
+		"kind":       "Probe",
+		"metadata": map[string]any{
+			"name": name, "namespace": ns, "labels": map[string]any{suiteLabel: "true"},
+		},
+		"spec": map[string]any{"message": message},
+	}}
+	if err := k8s.Create(ctx, u); err != nil {
+		t.Fatalf("create Probe %s/%s: %v", ns, name, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, u) })
+}
+
+// probeCRMessage reads a Probe CR's spec.message ("" when absent).
+func probeCRMessage(t *testing.T, ns, name string) string {
+	t.Helper()
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "examples.sharifmind.ir", Version: "v1", Kind: "Probe"})
+	if err := k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, u); err != nil {
+		return ""
+	}
+	msg, _ := u.Object["spec"].(map[string]any)["message"].(string)
+	return msg
 }
 
 // newRepo creates a suite-owned cluster-scoped PBSRepo from the given spec.

@@ -25,7 +25,11 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o pbs-agent ./cmd/agent
 
 # Final image: Debian + Proxmox pbs-client apt repo + static backup client
+# + static kubectl (the apply-manifests agent shells out to it against the
+# in-pod service account; version matches the cluster's kube minor line).
 FROM debian:trixie-slim
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.35.4
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && install -d -m 0755 /usr/share/keyrings \
     && curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg \
@@ -34,7 +38,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
        > /etc/apt/sources.list.d/pbs-client.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends proxmox-backup-client-static \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && arch="${TARGETARCH:-amd64}" \
+    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+       -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl
 
 COPY --from=builder /workspace/pbs-agent /usr/local/bin/pbs-agent
 

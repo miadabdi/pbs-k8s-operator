@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -250,5 +251,184 @@ func TestBuildBackupJobNotes(t *testing.T) {
 		if a == "--notes" && i > 0 {
 			t.Errorf("empty notes still passed: %q", job.Spec.Template.Spec.Containers[0].Command)
 		}
+	}
+}
+
+// ---- M5 restore Jobs -------------------------------------------------------
+
+var restoreSpec = RestoreJobSpec{
+	Name:           "r1-api-fetch",
+	Restore:        "r1",
+	Namespace:      "restore-test",
+	RepoSecret:     "pbsrepo-testenv",
+	Ref:            "host/pg-bk-1-k8s-ctl1/2026-09-16T10:00:00Z",
+	Image:          "pbs-agent:dev",
+	ServiceAccount: "pbs-restore",
+}
+
+// Shared skeleton: labels (incl managed), env contract, SA, backoff/TTL.
+func checkRestoreJobBase(t *testing.T, job *batchv1.Job) {
+	t.Helper()
+	if job.Namespace != restoreSpec.Namespace || job.Labels["pbsrestore"] != restoreSpec.Name &&
+		job.Labels["pbsrestore"] != restoreSpec.Restore {
+		t.Errorf("job meta = %s/%s labels %v", job.Namespace, job.Name, job.Labels)
+	}
+	if job.Labels[ManagedLabel] != "true" || job.Spec.Template.Labels[ManagedLabel] != "true" {
+		t.Errorf("managed label missing: %v / %v", job.Labels, job.Spec.Template.Labels)
+	}
+	if got := job.Spec.Template.Spec.ServiceAccountName; got != "pbs-restore" {
+		t.Errorf("serviceAccountName = %q, want pbs-restore", got)
+	}
+	if *job.Spec.BackoffLimit != 0 || *job.Spec.TTLSecondsAfterFinished != 3600 {
+		t.Errorf("backoffLimit/TTL = %d/%d, want 0/3600", *job.Spec.BackoffLimit, *job.Spec.TTLSecondsAfterFinished)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if c.Image != "pbs-agent:dev" || c.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("container image = %s/%s", c.Image, c.ImagePullPolicy)
+	}
+	// The 8 contract vars must be present (by name — restore jobs add the
+	// cache env on top).
+	byName := map[string]corev1.EnvVar{}
+	for _, e := range c.Env {
+		byName[e.Name] = e
+	}
+	for _, w := range wantEnv {
+		e, ok := byName[w.env]
+		if !ok || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil ||
+			e.ValueFrom.SecretKeyRef.Key != w.key || e.ValueFrom.SecretKeyRef.Name != "pbsrepo-testenv" {
+			t.Errorf("env %s = %+v, want secretKeyRef %s from pbsrepo-testenv", w.env, e, w.key)
+		}
+	}
+}
+
+// checkCache asserts the tmpfs client-cache volume + env (the O_TMPFILE fix).
+func checkCache(t *testing.T, job *batchv1.Job) {
+	t.Helper()
+	pod := job.Spec.Template.Spec
+	var vol *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == "client-cache" {
+			vol = &pod.Volumes[i]
+		}
+	}
+	if vol == nil || vol.EmptyDir == nil || vol.EmptyDir.Medium != corev1.StorageMediumMemory {
+		t.Errorf("client-cache volume = %+v, want memory emptyDir", vol)
+	}
+	byName := map[string]corev1.EnvVar{}
+	for _, e := range pod.Containers[0].Env {
+		byName[e.Name] = e
+	}
+	if byName["XDG_CACHE_HOME"].Value != "/cache" || byName["TMPDIR"].Value != "/cache" {
+		t.Errorf("cache env missing: %v", byName)
+	}
+}
+
+// Fetch Job: emptyDir staging, api.pxar.didx + --configmap upload, no pin.
+func TestBuildAPIFetchJob(t *testing.T) {
+	job := BuildAPIFetchJob(restoreSpec, "r1-api")
+	checkRestoreJobBase(t, job)
+	c := job.Spec.Template.Spec.Containers[0]
+	wantCmd := []string{
+		"pbs-agent", "restore-volume",
+		"--ref", restoreSpec.Ref,
+		"--archive", "api.pxar.didx",
+		"--target", "/staging/api",
+		"--configmap", "r1-api",
+	}
+	if !reflect.DeepEqual(c.Command, wantCmd) {
+		t.Errorf("command = %q\nwant %q", c.Command, wantCmd)
+	}
+	vol := job.Spec.Template.Spec.Volumes[0]
+	if vol.EmptyDir == nil {
+		t.Errorf("fetch volume = %+v, want emptyDir", vol)
+	}
+	if c.VolumeMounts[0].MountPath != "/staging/api" || c.VolumeMounts[0].ReadOnly {
+		t.Errorf("mounts = %+v, want rw /staging/api", c.VolumeMounts)
+	}
+	if job.Spec.Template.Spec.Affinity != nil {
+		t.Error("fetch job must not be node-pinned")
+	}
+	checkCache(t, job)
+}
+
+// Apply Jobs: ConfigMap mount, --file under it, drop/keep pass-through; the
+// pre and workload phases differ only in --phase.
+func TestBuildApplyJob(t *testing.T) {
+	spec := restoreSpec
+	spec.Name = "r1-api-pre"
+	job := BuildApplyJob(spec, "pre", "r1-api", []string{"Secret"}, []string{"Probe"})
+	checkRestoreJobBase(t, job)
+	c := job.Spec.Template.Spec.Containers[0]
+	wantCmd := []string{
+		"pbs-agent", "apply-manifests",
+		"--phase", "pre",
+		"--file", "/staging/api/api.yaml",
+		"--drop", "Secret",
+		"--keep", "Probe",
+	}
+	if !reflect.DeepEqual(c.Command, wantCmd) {
+		t.Errorf("command = %q\nwant %q", c.Command, wantCmd)
+	}
+	vol := job.Spec.Template.Spec.Volumes[0]
+	if vol.ConfigMap == nil || vol.ConfigMap.Name != "r1-api" {
+		t.Errorf("apply volume = %+v, want configmap r1-api", vol)
+	}
+	if !c.VolumeMounts[0].ReadOnly {
+		t.Errorf("apply mount must be read-only: %+v", c.VolumeMounts)
+	}
+
+	// No filters → no flags.
+	bare := BuildApplyJob(spec, "workload", "r1-api", nil, nil)
+	cmd := bare.Spec.Template.Spec.Containers[0].Command
+	for _, f := range []string{"--drop", "--keep"} {
+		for _, a := range cmd {
+			if a == f {
+				t.Errorf("empty filters still emitted %s: %q", f, cmd)
+			}
+		}
+	}
+}
+
+// Volume Job: node-pinned (WFFC binding follows the Job's node), PVCs
+// mounted rw at /backup/<name>, one --archive/--target pair per PVC.
+func TestBuildRestoreVolumeJob(t *testing.T) {
+	spec := restoreSpec
+	spec.Name = "r1-vol-k8s-ctl1"
+	job := BuildRestoreVolumeJob(spec, "k8s-ctl1", []string{"data-pg-0"})
+	checkRestoreJobBase(t, job)
+
+	sel := job.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	req := sel.NodeSelectorTerms[0].MatchExpressions[0]
+	if req.Key != "kubernetes.io/hostname" || req.Operator != corev1.NodeSelectorOpIn || req.Values[0] != "k8s-ctl1" {
+		t.Errorf("nodeAffinity = %+v, want hostname In [k8s-ctl1]", req)
+	}
+	vol := job.Spec.Template.Spec.Volumes[0]
+	if vol.PersistentVolumeClaim == nil || vol.PersistentVolumeClaim.ClaimName != "data-pg-0" {
+		t.Errorf("volume = %+v, want data-pg-0", vol)
+	}
+	m := job.Spec.Template.Spec.Containers[0].VolumeMounts[0]
+	if m.MountPath != "/backup/data-pg-0" || m.ReadOnly {
+		t.Errorf("mount = %+v, want rw /backup/data-pg-0", m)
+	}
+	wantCmd := []string{
+		"pbs-agent", "restore-volume",
+		"--ref", restoreSpec.Ref,
+		"--archive", "pvc-data-pg-0.pxar.didx",
+		"--target", "/backup/data-pg-0",
+	}
+	if got := job.Spec.Template.Spec.Containers[0].Command; !reflect.DeepEqual(got, wantCmd) {
+		t.Errorf("command = %q\nwant %q", got, wantCmd)
+	}
+	checkCache(t, job)
+	// The apply Jobs run only kubectl — no PBS client, no cache volume.
+	if apply := BuildApplyJob(restoreSpec, "pre", "r1-api", nil, nil); func() bool {
+		for _, v := range apply.Spec.Template.Spec.Volumes {
+			if v.Name == "client-cache" {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Error("apply job carries the client-cache volume, want kubectl-only")
 	}
 }
