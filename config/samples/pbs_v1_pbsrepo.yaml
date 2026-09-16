@@ -1,4 +1,4 @@
-apiVersion: pbs.pbs.sharifmind.ir/v1
+apiVersion: pbs.sharifmind.ir/v1
 kind: PBSRepo
 metadata:
   labels:

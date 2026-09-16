@@ -32,7 +32,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsbackups
   verbs:
@@ -43,7 +43,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsbackups/status
   - pbsrepos/status
@@ -54,7 +54,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsrepos
   verbs:
@@ -62,7 +62,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsrestores
   - pbsschedules
@@ -75,7 +75,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsrestores/finalizers
   - pbsschedules/finalizers

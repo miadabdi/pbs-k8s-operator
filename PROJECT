@@ -3,7 +3,7 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.16.0
-domain: pbs.sharifmind.ir
+domain: sharifmind.ir
 layout:
 - go.kubebuilder.io/v4
 projectName: pbs-operator
@@ -12,7 +12,7 @@ resources:
 - api:
     crdVersion: v1
   controller: true
-  domain: pbs.sharifmind.ir
+  domain: sharifmind.ir
   group: pbs
   kind: PBSRepo
   path: gitlab.sharifmind.ir/miad/pbs-operator/api/v1
@@ -21,7 +21,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: pbs.sharifmind.ir
+  domain: sharifmind.ir
   group: pbs
   kind: PBSBackup
   path: gitlab.sharifmind.ir/miad/pbs-operator/api/v1
@@ -30,7 +30,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: pbs.sharifmind.ir
+  domain: sharifmind.ir
   group: pbs
   kind: PBSSchedule
   path: gitlab.sharifmind.ir/miad/pbs-operator/api/v1
@@ -39,7 +39,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: pbs.sharifmind.ir
+  domain: sharifmind.ir
   group: pbs
   kind: PBSRestore
   path: gitlab.sharifmind.ir/miad/pbs-operator/api/v1

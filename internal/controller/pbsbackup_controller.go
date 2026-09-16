@@ -77,14 +77,14 @@ type PBSBackupReconciler struct {
 	AgentImage string
 }
 
-// +kubebuilder:rbac:groups=pbs.pbs.sharifmind.ir,resources=pbsbackups,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=pbs.pbs.sharifmind.ir,resources=pbsbackups/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsbackups,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsbackups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=pbs.pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
+// +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
 
 // Reconcile walks the phase machine New → Scheduled → Running →
 // Completed|Failed. Terminal phases no-op. See the helper docs for events,

@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.22.0
-  name: pbsbackups.pbs.pbs.sharifmind.ir
+  name: pbsbackups.pbs.sharifmind.ir
 spec:
-  group: pbs.pbs.sharifmind.ir
+  group: pbs.sharifmind.ir
   names:
     kind: PBSBackup
     listKind: PBSBackupList

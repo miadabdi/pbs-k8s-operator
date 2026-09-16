@@ -75,8 +75,8 @@ type PBSRepoReconciler struct {
 	Recorder record.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=pbs.pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
-// +kubebuilder:rbac:groups=pbs.pbs.sharifmind.ir,resources=pbsrepos/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos,verbs=get;list;watch
+// +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsrepos/status,verbs=get;update;patch
 // Secrets are read cluster-wide: PBSRepo is a cluster-scoped CR whose
 // secretRef may point at any namespace, so namespace-scoped RBAC cannot cover it.
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch

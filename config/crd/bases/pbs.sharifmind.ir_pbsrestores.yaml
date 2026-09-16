@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.22.0
-  name: pbsschedules.pbs.pbs.sharifmind.ir
+  name: pbsrestores.pbs.sharifmind.ir
 spec:
-  group: pbs.pbs.sharifmind.ir
+  group: pbs.sharifmind.ir
   names:
-    kind: PBSSchedule
-    listKind: PBSScheduleList
-    plural: pbsschedules
-    singular: pbsschedule
+    kind: PBSRestore
+    listKind: PBSRestoreList
+    plural: pbsrestores
+    singular: pbsrestore
   scope: Namespaced
   versions:
   - name: v1
     schema:
       openAPIV3Schema:
-        description: PBSSchedule is the Schema for the pbsschedules API
+        description: PBSRestore is the Schema for the pbsrestores API
         properties:
           apiVersion:
             description: |-
@@ -37,19 +37,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of PBSSchedule
+            description: spec defines the desired state of PBSRestore
             properties:
               foo:
-                description: foo is an example field of PBSSchedule. Edit pbsschedule_types.go
+                description: foo is an example field of PBSRestore. Edit pbsrestore_types.go
                   to remove/update
                 type: string
             type: object
           status:
-            description: status defines the observed state of PBSSchedule
+            description: status defines the observed state of PBSRestore
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the PBSSchedule resource.
+                  conditions represent the current state of the PBSRestore resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include:

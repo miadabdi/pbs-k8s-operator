@@ -1,7 +1,7 @@
 # This rule is not used by the project pbs-operator itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants read-only access to pbs.pbs.sharifmind.ir resources.
+# Grants read-only access to pbs.sharifmind.ir resources.
 # This role is intended for users who need visibility into these resources
 # without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
 
@@ -14,7 +14,7 @@ metadata:
   name: pbsbackup-viewer-role
 rules:
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsbackups
   verbs:
@@ -22,7 +22,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - pbs.pbs.sharifmind.ir
+  - pbs.sharifmind.ir
   resources:
   - pbsbackups/status
   verbs:
