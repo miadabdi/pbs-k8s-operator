@@ -422,13 +422,15 @@ func TestBackupArgvNoNotes(t *testing.T) {
 	}
 }
 
-// M3: notes ride on a post-upload `snapshot notes update` call instead.
+// M3: notes ride on a post-upload `snapshot notes update` call instead —
+// with --ns, or the client resolves the snapshot in the ROOT namespace.
 func TestNotesArgv(t *testing.T) {
 	want := []string{
 		"proxmox-backup-client", "snapshot", "notes", "update",
+		"--ns", "tenant1",
 		"host/bk-1/2025-05-16T13:20:00Z", `{"keep-daily":7}`,
 	}
-	if got := notesArgv("host/bk-1/2025-05-16T13:20:00Z", `{"keep-daily":7}`); !reflect.DeepEqual(got, want) {
+	if got := notesArgv("tenant1", "host/bk-1/2025-05-16T13:20:00Z", `{"keep-daily":7}`); !reflect.DeepEqual(got, want) {
 		t.Errorf("notesArgv() = %q\nwant %q", got, want)
 	}
 }
@@ -453,7 +455,7 @@ func TestRunBackupNotes(t *testing.T) {
 	if len(fr.argv) != 3 {
 		t.Fatalf("client calls = %d, want 3: %q", len(fr.argv), fr.argv)
 	}
-	want := notesArgv("host/bk-1/2025-05-16T13:20:00Z", "keep=7d")
+	want := notesArgv("tenant1", "host/bk-1/2025-05-16T13:20:00Z", "keep=7d")
 	if !reflect.DeepEqual(fr.argv[2], want) {
 		t.Errorf("notes argv = %q\nwant %q", fr.argv[2], want)
 	}

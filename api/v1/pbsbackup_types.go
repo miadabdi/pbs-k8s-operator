@@ -58,10 +58,11 @@ type PBSBackupSpec struct {
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 
-	// notes is carried verbatim to the PBS snapshot via
-	// proxmox-backup-client --notes. PBS has no arbitrary snapshot labels, so
-	// Notes is the retention-hint channel (operators can encode keep-policy
-	// JSON here); pruning itself stays server-side.
+	// notes is attached to the PBS snapshot post-upload via
+	// proxmox-backup-client `snapshot notes update` (best-effort; requires
+	// Datastore.Modify on the datastore namespace). PBS has no arbitrary
+	// snapshot labels, so Notes is the retention-hint channel (operators can
+	// encode keep-policy JSON here); pruning itself stays server-side.
 	// +optional
 	Notes string `json:"notes,omitempty"`
 }

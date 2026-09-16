@@ -78,9 +78,11 @@ func backupArgv(ns, keyfilePath string, pvcs []string, apiDir string) []string {
 // notesArgv builds the post-upload command that attaches the retention-hint
 // notes to the fresh snapshot. The backup subcommand has no --notes flag in
 // the real client ("schema does not allow additional properties" — live-
-// verified); `snapshot notes update` is the only channel.
-func notesArgv(ref, notes string) []string {
-	return []string{clientBinary, "snapshot", "notes", "update", ref, notes}
+// verified); `snapshot notes update` is the only channel. --ns is required:
+// without it the client resolves the snapshot in the ROOT namespace and the
+// update misses the backup's namespace (same contract as listArgv).
+func notesArgv(ns, ref, notes string) []string {
+	return []string{clientBinary, "snapshot", "notes", "update", "--ns", ns, ref, notes}
 }
 
 // listArgv builds the snapshot-list command used to find the fresh snapshot.
@@ -114,7 +116,10 @@ type BackupDeps struct {
 // returns the process exit code. The client binary's stdout/stderr stream
 // through to ours; the termination log receives the controller contract JSON.
 // apiDir (the --api staging mount) adds the api.pxar pair; empty skips it.
-// notes (M3) is passed through to the client as --notes=<value>.
+// notes (M3) is attached to the fresh snapshot post-upload via
+// `snapshot notes update` (best-effort: a failure warns, never fails the
+// backup — the snapshot is already safe, and the token may lack
+// Datastore.Modify).
 func RunBackup(d BackupDeps, pvcs []string, apiDir, notes, termlogPath string) int {
 	// fail reports an error via the termlog error JSON and our stderr.
 	fail := func(code int, format string, args ...any) int {
@@ -171,7 +176,7 @@ func RunBackup(d BackupDeps, pvcs []string, apiDir, notes, termlogPath string) i
 	// failure is a loud stderr warning, never a failed backup.
 	if notes != "" {
 		errBuf.Reset()
-		if err := d.Run(notesArgv(snapshotRef(snap), notes), env, io.Discard, tee); err != nil {
+		if err := d.Run(notesArgv(c.NS, snapshotRef(snap), notes), env, io.Discard, tee); err != nil {
 			fmt.Fprintf(d.Stderr, "pbs-agent: WARNING: snapshot %s uploaded, but setting notes failed: %s\n",
 				snapshotRef(snap), firstLine(errBuf.String()))
 		}

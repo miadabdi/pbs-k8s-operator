@@ -517,6 +517,20 @@ var verifySeq atomic.Uint64
 // its stdout trimmed to the JSON array the CLI prints (stderr junk stripped).
 func runVerifyJob(t *testing.T, kind, clientCmd string) string {
 	t.Helper()
+	out := runClientJob(t, kind, clientCmd)
+	// The CLI prints a bare JSON array on stdout; stderr junk may precede it.
+	lo, hi := strings.Index(out, "["), strings.LastIndex(out, "]")
+	if lo < 0 || hi < lo {
+		t.Fatalf("verify job output has no JSON array: %s", out)
+	}
+	return out[lo : hi+1]
+}
+
+// runClientJob is runVerifyJob without the JSON-array slicing: it returns the
+// raw pod output of one client command (for outputs that are not arrays,
+// e.g. `snapshot notes show <ref>`).
+func runClientJob(t *testing.T, kind, clientCmd string) string {
+	t.Helper()
 	name := fmt.Sprintf("e2e-verify-%s-%d-%d", kind, runID, verifySeq.Add(1))
 	port := liveRepo.Spec.Port
 	if port == 0 {
@@ -551,14 +565,7 @@ func runVerifyJob(t *testing.T, kind, clientCmd string) string {
 	}
 	t.Cleanup(func() { _ = k8s.Delete(ctx, job) })
 	waitJobComplete(t, e2eNS, name, 2*time.Minute)
-
-	out := podLogs(t, e2eNS, name)
-	// The CLI prints a bare JSON array on stdout; stderr junk may precede it.
-	lo, hi := strings.Index(out, "["), strings.LastIndex(out, "]")
-	if lo < 0 || hi < lo {
-		t.Fatalf("verify job output has no JSON array: %s", out)
-	}
-	return out[lo : hi+1]
+	return podLogs(t, e2eNS, name)
 }
 
 // newUnboundPVC creates a local-path PVC that never binds (the storage class

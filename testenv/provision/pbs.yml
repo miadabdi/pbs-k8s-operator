@@ -180,6 +180,13 @@
     # token auth-id. DatastoreAdmin is listed last for {{ pbs_user }} on the
     # datastore root in case acl entries are last-write-wins per (path,
     # auth-id) — Admin is a superset of Reader, so that order is safe either way.
+    # The namespace-path DatastoreAdmin grants exist for Datastore.Modify —
+    # required by `proxmox-backup-client snapshot notes update` (the operator's
+    # retention-notes channel). Live-verified on PBS 4.2.5 (GET /access/roles):
+    # DatastorePowerUser = Backup+Prune ONLY (no Modify), so DatastoreAdmin is
+    # the narrowest built-in carrying Modify. Roles ACCUMULATE per (path,
+    # auth-id) — acl list shows Admin and Reader coexisting on the datastore
+    # root — so these add to, not replace, the Backup entries.
     - name: Apply ACLs
       ansible.builtin.command:
         argv:
@@ -193,6 +200,8 @@
       loop:
         - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreBackup, who: "{{ pbs_user }}" }
         - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreBackup, who: "{{ pbs_user }}!producer" }
+        - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreAdmin, who: "{{ pbs_user }}" }
+        - { path: "/datastore/{{ pbs_datastore }}/{{ pbs_namespace }}", role: DatastoreAdmin, who: "{{ pbs_user }}!producer" }
         - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreReader, who: "{{ pbs_user }}" }
         - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreReader, who: "{{ pbs_user }}!producer" }
         - { path: "/datastore/{{ pbs_datastore }}", role: DatastoreAdmin, who: "{{ pbs_user }}" }

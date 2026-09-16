@@ -351,6 +351,18 @@ func TestScheduledBackupsAndMetrics(t *testing.T) {
 		t.Fatalf("job %s command %q lacks --notes %s", job.Name, cmd, notes)
 	}
 
+	// 12b: the notes really landed on PBS. `snapshot list` JSON omits notes
+	// on PBS 4.2.5 (live-verified), so read them back from the completed
+	// backup's own snapshot ref directly.
+	if completed.Status.SnapshotRef == "" {
+		t.Fatalf("completed backup %s has no snapshotRef", completed.Name)
+	}
+	out := runClientJob(t, "notes", "proxmox-backup-client snapshot notes show "+
+		completed.Status.SnapshotRef+" --ns "+liveRepo.Spec.Namespace)
+	if strings.TrimSpace(out) != notes {
+		t.Fatalf("snapshot %s notes %q, want %q", completed.Status.SnapshotRef, out, notes)
+	}
+
 	// One manual broken backup (S7 pattern): Ready repo whose token corrupts
 	// after the health check → the Job runs, fails auth, backup goes Failed.
 	broken := fmt.Sprintf("e2e-m3-badtoken-%d", runID)
