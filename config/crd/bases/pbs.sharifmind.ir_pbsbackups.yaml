@@ -49,6 +49,13 @@ spec:
           spec:
             description: spec defines the desired state of PBSBackup
             properties:
+              notes:
+                description: |-
+                  notes is carried verbatim to the PBS snapshot via
+                  proxmox-backup-client --notes. PBS has no arbitrary snapshot labels, so
+                  Notes is the retention-hint channel (operators can encode keep-policy
+                  JSON here); pruning itself stays server-side.
+                type: string
               pvcs:
                 description: |-
                   pvcs is an explicit list of PVC names (in the PBSBackup's namespace).

@@ -57,6 +57,13 @@ type PBSBackupSpec struct {
 	// selected.
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
+
+	// notes is carried verbatim to the PBS snapshot via
+	// proxmox-backup-client --notes. PBS has no arbitrary snapshot labels, so
+	// Notes is the retention-hint channel (operators can encode keep-policy
+	// JSON here); pruning itself stays server-side.
+	// +optional
+	Notes string `json:"notes,omitempty"`
 }
 
 // BackupJobStatus reports the k8s backup Job for one involved node.

@@ -17,6 +17,7 @@ type BackupJobSpec struct {
 	RepoSecret       string // name of the PBSRepo secret (testenv contract keys)
 	PVCs             []string
 	StagingConfigMap string // optional: ConfigMap with api.yaml → api.pxar (M2)
+	Notes            string // optional: PBSBackup spec.notes → agent --notes (M3)
 	Image            string
 	ServiceAccount   string // optional; empty → default
 }
@@ -76,6 +77,9 @@ func BuildBackupJob(spec BackupJobSpec) *batchv1.Job {
 		})
 		mounts = append(mounts, corev1.VolumeMount{Name: "api-staging", MountPath: "/staging/api", ReadOnly: true})
 		command = append(command, "--api", "/staging/api")
+	}
+	if spec.Notes != "" {
+		command = append(command, "--notes", spec.Notes)
 	}
 
 	env := make([]corev1.EnvVar, len(envContract))

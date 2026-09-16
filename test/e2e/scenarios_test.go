@@ -302,3 +302,110 @@ func TestTerminalNoResurrection(t *testing.T) {
 		time.Sleep(5 * time.Second)
 	}
 }
+
+// Scenario 10 (M3): a PBSSchedule `*/1 * * * *` in the pg namespace fires at
+// least twice (each fire a Completed backup templated with Notes); one manual
+// broken backup (S7 pattern) then flips errors_total; a metrics scrape pod
+// asserts pbs_backup_errors_total{namespace="pg"} >= 1 and
+// pbs_backup_last_success_timestamp_seconds{namespace="pg"} > 0.
+func TestScheduledBackupsAndMetrics(t *testing.T) {
+	requireEnv(t)
+	name := fmt.Sprintf("pg-sched-%d", runID)
+	notes := fmt.Sprintf(`{"e2e":"sched","run":%d}`, runID)
+	newSchedule(t, pgNS, name, repoName, "*/1 * * * *", pbsv1.PBSBackupTemplate{Notes: notes})
+
+	// ≤150s: at least two <schedule>-* backups reach Completed, Notes intact.
+	var completed pbsv1.PBSBackup
+	eventually(t, 150*time.Second, "two scheduled backups to reach Completed", func() error {
+		list := &pbsv1.PBSBackupList{}
+		if err := k8s.List(ctx, list, client.InNamespace(pgNS), client.MatchingLabels{"pbsschedule": name}); err != nil {
+			return err
+		}
+		n := 0
+		for i := range list.Items {
+			b := list.Items[i]
+			if b.Status.Phase == pbsv1.BackupPhaseCompleted {
+				if b.Spec.Notes != notes {
+					t.Fatalf("scheduled backup %s notes %q, want %q", b.Name, b.Spec.Notes, notes)
+				}
+				n++
+				if b.CreationTimestamp.After(completed.CreationTimestamp.Time) {
+					completed = b
+				}
+			}
+		}
+		if n < 2 {
+			return fmt.Errorf("%d of 2 scheduled backups Completed", n)
+		}
+		return nil
+	})
+
+	// The backup's Job carried --notes into the agent argv (full chain proof
+	// short of PBS itself: schedule → backup → job).
+	job := &batchv1.Job{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: pgNS, Name: completed.Name + "-" + pgNode}, job); err != nil {
+		t.Fatalf("get job of scheduled backup %s: %v", completed.Name, err)
+	}
+	cmd := job.Spec.Template.Spec.Containers[0].Command
+	if !containsPair(cmd, "--notes", notes) {
+		t.Fatalf("job %s command %q lacks --notes %s", job.Name, cmd, notes)
+	}
+
+	// One manual broken backup (S7 pattern): Ready repo whose token corrupts
+	// after the health check → the Job runs, fails auth, backup goes Failed.
+	broken := fmt.Sprintf("e2e-m3-badtoken-%d", runID)
+	ensureE2ENS(t)
+	src := getSecret(t, "default", repoSecret)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: broken, Namespace: e2eNS, Labels: map[string]string{suiteLabel: "true"}},
+		Data:       src.Data,
+	}
+	if err := k8s.Create(ctx, sec); err != nil {
+		t.Fatalf("create secret %s/%s: %v", e2eNS, broken, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, sec) })
+	spec := scratchRepoSpec()
+	spec.SecretRef.Name = broken
+	spec.SecretRef.Namespace = e2eNS
+	newRepo(t, broken, spec)
+	waitForRepoCond(t, broken, metav1.ConditionTrue, "Reachable", 90*time.Second)
+	before := sec.DeepCopy()
+	sec.Data["tokenSecret"] = []byte("e2e-corrupted-token-secret")
+	if err := k8s.Patch(ctx, sec, client.MergeFrom(before)); err != nil {
+		t.Fatalf("corrupt secret: %v", err)
+	}
+	newBackup(t, pgNS, "pg-"+broken, broken, nil)
+	failed := waitForBackupTerminal(t, pgNS, "pg-"+broken, 3*time.Minute)
+	if failed.Status.Phase != pbsv1.BackupPhaseFailed {
+		t.Fatalf("broken backup phase %s, want Failed", failed.Status.Phase)
+	}
+
+	// Scrape the manager metrics (bearer-authed pod) and assert both series.
+	body := scrapeManagerMetrics(t)
+	errs, ok := metricLine(body, "pbs_backup_errors_total", pgNS)
+	if !ok || errs < 1 {
+		t.Fatalf("pbs_backup_errors_total{namespace=%q} = %v (present: %v), want >= 1\nbody head:\n%s", pgNS, errs, ok, head(body, 400))
+	}
+	last, ok := metricLine(body, "pbs_backup_last_success_timestamp_seconds", pgNS)
+	if !ok || last <= 0 {
+		t.Fatalf("pbs_backup_last_success_timestamp_seconds{namespace=%q} = %v (present: %v), want > 0\nbody head:\n%s", pgNS, last, ok, head(body, 400))
+	}
+}
+
+// containsPair reports whether flag,value appears adjacently in argv.
+func containsPair(argv []string, flag, value string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == flag && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// head returns the first n bytes of s for failure diagnostics.
+func head(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}

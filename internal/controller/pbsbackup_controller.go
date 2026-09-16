@@ -43,6 +43,8 @@ import (
 	pbsv1 "gitlab.sharifmind.ir/miad/pbs-operator/api/v1"
 	// Aliased: the local variable "backup" in Reconcile shadows the package name.
 	backuplib "gitlab.sharifmind.ir/miad/pbs-operator/internal/backup"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -83,6 +85,60 @@ type PBSBackupReconciler struct {
 	// Nil disables API serialization (M1 mode: no staging ConfigMap, and the
 	// zero-PVC gate reverts to "no PVCs → hold").
 	Serializer *backuplib.Serializer
+
+	// Metrics holds the operator's Prometheus vecs (M3); nil disables emission.
+	Metrics *BackupMetrics
+}
+
+// BackupMetrics is the operator's Prometheus contract. Labels: namespace only.
+// last_success and duration are SET (never added) on Completed transitions
+// only; errors_total counts Failed transitions. A failure never touches
+// last_success (prod BackupStale/BackupJobFailed compatibility).
+type BackupMetrics struct {
+	LastSuccess *prometheus.GaugeVec
+	Duration    *prometheus.GaugeVec
+	Errors      *prometheus.CounterVec
+}
+
+// NewBackupMetrics builds the metric vecs and registers them on reg (pass the
+// manager's metrics registry in main).
+func NewBackupMetrics(reg prometheus.Registerer) *BackupMetrics {
+	m := &BackupMetrics{
+		LastSuccess: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "pbs_backup_last_success_timestamp_seconds",
+			Help: "Unix timestamp of the last PBSBackup Completed transition in the namespace.",
+		}, []string{"namespace"}),
+		Duration: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "pbs_backup_duration_seconds",
+			Help: "CompletedAt-StartedAt seconds of the last successful PBSBackup in the namespace.",
+		}, []string{"namespace"}),
+		Errors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "pbs_backup_errors_total",
+			Help: "PBSBackups that reached the Failed phase in the namespace.",
+		}, []string{"namespace"}),
+	}
+	reg.MustRegister(m.LastSuccess, m.Duration, m.Errors)
+	return m
+}
+
+// observeCompleted stamps the success gauges (terminal transition only).
+func (r *PBSBackupReconciler) observeCompleted(b *pbsv1.PBSBackup) {
+	if r.Metrics == nil || b.Status.CompletedAt == nil {
+		return
+	}
+	r.Metrics.LastSuccess.WithLabelValues(b.Namespace).Set(float64(b.Status.CompletedAt.Unix()))
+	if b.Status.StartedAt != nil {
+		r.Metrics.Duration.WithLabelValues(b.Namespace).
+			Set(b.Status.CompletedAt.Sub(b.Status.StartedAt.Time).Seconds())
+	}
+}
+
+// observeFailed bumps the error counter (terminal transition only).
+func (r *PBSBackupReconciler) observeFailed(b *pbsv1.PBSBackup) {
+	if r.Metrics == nil {
+		return
+	}
+	r.Metrics.Errors.WithLabelValues(b.Namespace).Inc()
 }
 
 // +kubebuilder:rbac:groups=pbs.sharifmind.ir,resources=pbsbackups,verbs=get;list;watch;create;update;patch
@@ -253,6 +309,7 @@ func (r *PBSBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				RepoSecret:       repoSecret,
 				PVCs:             groups[node],
 				StagingConfigMap: staging,
+				Notes:            backup.Spec.Notes,
 				Image:            r.agentImage(),
 			})
 			if err := ctrl.SetControllerReference(&backup, job, r.Scheme); err != nil {
@@ -530,6 +587,7 @@ func (r *PBSBackupReconciler) completeBackup(ctx context.Context, b *pbsv1.PBSBa
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	r.observeCompleted(b)
 	return ctrl.Result{}, nil // terminal: no requeue
 }
 
@@ -551,6 +609,7 @@ func (r *PBSBackupReconciler) failBackup(ctx context.Context, b *pbsv1.PBSBackup
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	r.observeFailed(b)
 	return ctrl.Result{}, nil // terminal: no requeue
 }
 

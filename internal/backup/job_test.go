@@ -2,6 +2,7 @@ package backup
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -229,5 +230,25 @@ func TestBuildBackupJobStagingOnly(t *testing.T) {
 	}
 	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/staging/api" {
 		t.Errorf("mounts = %+v, want only /staging/api", c.VolumeMounts)
+	}
+}
+
+// M3: spec.Notes is passed to the agent as "--notes <value>"; empty → absent.
+func TestBuildBackupJobNotes(t *testing.T) {
+	spec := fullSpec
+	spec.Notes = `{"keep-daily":7}`
+	job := BuildBackupJob(spec)
+	cmd := job.Spec.Template.Spec.Containers[0].Command
+	want := []string{"pbs-agent", "backup", "--pvc", "pg-data", "--pvc", "pg-wal", "--notes", `{"keep-daily":7}`}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q\nwant %q", cmd, want)
+	}
+
+	spec.Notes = ""
+	job = BuildBackupJob(spec)
+	for i, a := range job.Spec.Template.Spec.Containers[0].Command {
+		if a == "--notes" && i > 0 {
+			t.Errorf("empty notes still passed: %q", job.Spec.Template.Spec.Containers[0].Command)
+		}
 	}
 }

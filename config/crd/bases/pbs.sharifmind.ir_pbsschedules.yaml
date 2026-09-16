@@ -14,7 +14,17 @@ spec:
     singular: pbsschedule
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.schedule
+      name: Schedule
+      type: string
+    - jsonPath: .spec.suspend
+      name: Suspend
+      type: boolean
+    - jsonPath: .status.lastScheduleTime
+      name: LastSchedule
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
         description: PBSSchedule is the Schema for the pbsschedules API
@@ -39,25 +49,102 @@ spec:
           spec:
             description: spec defines the desired state of PBSSchedule
             properties:
-              foo:
-                description: foo is an example field of PBSSchedule. Edit pbsschedule_types.go
-                  to remove/update
+              repoRef:
+                description: repoRef is the name of the cluster-scoped PBSRepo backups
+                  are sent to.
                 type: string
+              schedule:
+                description: schedule is a standard 5-field cron expression (minute
+                  hour dom month dow).
+                pattern: ^(\S+\s+){4}\S+$
+                type: string
+              suspend:
+                description: suspend stops new backup creation; NextScheduleTime is
+                  still computed.
+                type: boolean
+              template:
+                description: template is the PBSBackup body created on each fire.
+                properties:
+                  notes:
+                    description: |-
+                      notes is carried verbatim to each created PBSBackup's spec.notes and
+                      from there to the PBS snapshot (proxmox-backup-client --notes). PBS has
+                      no arbitrary snapshot labels, so Notes is THE retention-hint channel:
+                      operators can e.g. encode a keep-policy JSON here; pruning itself stays
+                      server-side.
+                    type: string
+                  pvcs:
+                    description: pvcs is an explicit list of PVC names, as in PBSBackupSpec.
+                    items:
+                      type: string
+                    type: array
+                  selector:
+                    description: selector selects PVCs by label, as in PBSBackupSpec.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+            required:
+            - repoRef
+            - schedule
+            - template
             type: object
           status:
             description: status defines the observed state of PBSSchedule
             properties:
+              active:
+                description: |-
+                  active lists the names of PBSBackups from this schedule that have not
+                  reached a terminal phase yet.
+                items:
+                  type: string
+                type: array
               conditions:
                 description: |-
-                  conditions represent the current state of the PBSSchedule resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the current state of the PBSSchedule resource:
+                  Ready=True/Valid when the cron parses and the repo is Ready;
+                  Ready=False/InvalidCron or /RepoMissing otherwise.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +203,16 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastScheduleTime:
+                description: lastScheduleTime is the fire time the schedule last created
+                  a backup at.
+                format: date-time
+                type: string
+              nextScheduleTime:
+                description: nextScheduleTime is the computed next fire time; observability
+                  only.
+                format: date-time
+                type: string
             type: object
         required:
         - spec

@@ -207,7 +207,7 @@ func TestRunBackupSuccess(t *testing.T) {
 	d := deps(fr.run)
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a", "zdata"}, "", termlog)
+	code := RunBackup(d, []string{"data-a", "zdata"}, "", "", termlog)
 	if code != 0 {
 		t.Fatalf("RunBackup exit = %d, want 0", code)
 	}
@@ -250,7 +250,7 @@ func TestRunBackupClientFailure(t *testing.T) {
 	d := deps(fr.run)
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a"}, "", termlog)
+	code := RunBackup(d, []string{"data-a"}, "", "", termlog)
 	if code != 1 {
 		t.Fatalf("RunBackup exit = %d, want 1 (fallback)", code)
 	}
@@ -273,7 +273,7 @@ func TestRunBackupMissingEnv(t *testing.T) {
 	d.Getenv = testEnv("PBS_TOKEN_SECRET", "PBS_KEYFILE")
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(d, []string{"data-a"}, "", termlog)
+	code := RunBackup(d, []string{"data-a"}, "", "", termlog)
 	if code != 2 {
 		t.Fatalf("RunBackup exit = %d, want 2", code)
 	}
@@ -302,7 +302,7 @@ func TestRunBackupWithAPI(t *testing.T) {
 	}}
 	termlog := filepath.Join(t.TempDir(), "termlog.json")
 
-	code := RunBackup(deps(fr.run), nil, "/staging/api", termlog)
+	code := RunBackup(deps(fr.run), nil, "/staging/api", "", termlog)
 	if code != 0 {
 		t.Fatalf("RunBackup exit = %d, want 0", code)
 	}
@@ -340,7 +340,7 @@ func TestMaterializeKeyfile(t *testing.T) {
 
 func TestParseBackupArgs(t *testing.T) {
 	t.Run("pvc order preserved, TERMLOG default", func(t *testing.T) {
-		pvcs, api, termlog, err := ParseBackupArgs([]string{"--pvc", "b", "--pvc", "a"}, func(string) string { return "" })
+		pvcs, api, _, termlog, err := ParseBackupArgs([]string{"--pvc", "b", "--pvc", "a"}, func(string) string { return "" })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -355,7 +355,7 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("--api with pvcs", func(t *testing.T) {
-		pvcs, api, _, err := ParseBackupArgs([]string{"--pvc", "a", "--api", "/staging/api"}, func(string) string { return "" })
+		pvcs, api, _, _, err := ParseBackupArgs([]string{"--pvc", "a", "--api", "/staging/api"}, func(string) string { return "" })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -364,7 +364,7 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("--api alone (API-only backup)", func(t *testing.T) {
-		pvcs, api, _, err := ParseBackupArgs([]string{"--api", "/staging/api"}, func(string) string { return "" })
+		pvcs, api, _, _, err := ParseBackupArgs([]string{"--api", "/staging/api"}, func(string) string { return "" })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -373,7 +373,7 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("TERMLOG env override honored", func(t *testing.T) {
-		_, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a"}, func(k string) string {
+		_, _, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a"}, func(k string) string {
 			if k == "TERMLOG" {
 				return "/tmp/custom-termlog"
 			}
@@ -387,7 +387,7 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("--termlog flag beats env", func(t *testing.T) {
-		_, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a", "--termlog", "/x"}, func(k string) string {
+		_, _, _, termlog, err := ParseBackupArgs([]string{"--pvc", "a", "--termlog", "/x"}, func(k string) string {
 			if k == "TERMLOG" {
 				return "/from-env"
 			}
@@ -401,8 +401,108 @@ func TestParseBackupArgs(t *testing.T) {
 		}
 	})
 	t.Run("no --pvc and no --api is an error", func(t *testing.T) {
-		if _, _, _, err := ParseBackupArgs(nil, func(string) string { return "" }); err == nil {
+		if _, _, _, _, err := ParseBackupArgs(nil, func(string) string { return "" }); err == nil {
 			t.Error("expected error for missing --pvc and --api")
 		}
 	})
+}
+
+// M3: the backup argv NEVER carries notes — the real client rejects a
+// --notes flag on backup ("schema does not allow additional properties").
+func TestBackupArgvNoNotes(t *testing.T) {
+	got := backupArgv("tenant1", "/tmp/kf.json", []string{"data-a"}, "")
+	want := []string{
+		"proxmox-backup-client", "backup",
+		"--ns", "tenant1",
+		"--keyfile", "/tmp/kf.json",
+		"pvc-data-a.pxar:/backup/data-a",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("backupArgv() = %q\nwant %q", got, want)
+	}
+}
+
+// M3: notes ride on a post-upload `snapshot notes update` call instead.
+func TestNotesArgv(t *testing.T) {
+	want := []string{
+		"proxmox-backup-client", "snapshot", "notes", "update",
+		"host/bk-1/2025-05-16T13:20:00Z", `{"keep-daily":7}`,
+	}
+	if got := notesArgv("host/bk-1/2025-05-16T13:20:00Z", `{"keep-daily":7}`); !reflect.DeepEqual(got, want) {
+		t.Errorf("notesArgv() = %q\nwant %q", got, want)
+	}
+}
+
+// M3: RunBackup threads notes into the third client call, after upload+list.
+// A notes failure (e.g. the token lacks Datastore.Modify) is a warning: the
+// backup still reports success — the snapshot is already safe.
+func TestRunBackupNotes(t *testing.T) {
+	fr := &fakeRunner{calls: []struct {
+		err    error
+		stdout string
+		stderr string
+	}{
+		{},                            // backup
+		{stdout: snapshotListFixture}, // snapshot list
+		{},                            // snapshot notes update
+	}}
+	termlog := filepath.Join(t.TempDir(), "termlog.json")
+	if code := RunBackup(deps(fr.run), []string{"data-a"}, "", `keep=7d`, termlog); code != 0 {
+		t.Fatalf("RunBackup exit = %d, want 0", code)
+	}
+	if len(fr.argv) != 3 {
+		t.Fatalf("client calls = %d, want 3: %q", len(fr.argv), fr.argv)
+	}
+	want := notesArgv("host/bk-1/2025-05-16T13:20:00Z", "keep=7d")
+	if !reflect.DeepEqual(fr.argv[2], want) {
+		t.Errorf("notes argv = %q\nwant %q", fr.argv[2], want)
+	}
+}
+
+// M3: notes application denied (Backup-only token) → warning on stderr, still
+// exit 0 with the success termlog.
+func TestRunBackupNotesDenied(t *testing.T) {
+	fr := &fakeRunner{calls: []struct {
+		err    error
+		stdout string
+		stderr string
+	}{
+		{},                            // backup
+		{stdout: snapshotListFixture}, // snapshot list
+		{err: errors.New("exit status 1"), stderr: "Error: permission check failed\n"},
+	}}
+	d := deps(fr.run)
+	termlog := filepath.Join(t.TempDir(), "termlog.json")
+	if code := RunBackup(d, []string{"data-a"}, "", `keep=7d`, termlog); code != 0 {
+		t.Fatalf("RunBackup exit = %d, want 0 (notes failure is a warning)", code)
+	}
+	errOut := d.Stderr.(*strings.Builder).String()
+	if !strings.Contains(errOut, "WARNING") || !strings.Contains(errOut, "permission check failed") {
+		t.Errorf("stderr %q lacks the notes warning", errOut)
+	}
+	b, err := os.ReadFile(termlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"snapshotRef":"host/bk-1/`) {
+		t.Errorf("termlog = %s, want success JSON", b)
+	}
+}
+
+// M3: ParseBackupArgs accepts --notes.
+func TestParseBackupArgsNotes(t *testing.T) {
+	_, _, notes, _, err := ParseBackupArgs([]string{"--pvc", "a", "--notes", "keep=7d"}, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes != "keep=7d" {
+		t.Errorf("notes = %q, want keep=7d", notes)
+	}
+	_, _, notes, _, err = ParseBackupArgs([]string{"--pvc", "a"}, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes != "" {
+		t.Errorf("notes = %q, want empty by default", notes)
+	}
 }

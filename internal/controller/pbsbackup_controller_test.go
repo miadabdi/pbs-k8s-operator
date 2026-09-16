@@ -25,6 +25,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -185,12 +187,18 @@ func fetchBackup(ctx context.Context, ns, name string) *pbsv1.PBSBackup {
 }
 
 func reconcileBackup(ctx context.Context, ns, name string, rec record.EventRecorder) reconcile.Result {
+	return reconcileBackupWith(ctx, ns, name, rec, nil)
+}
+
+// reconcileBackupWith runs one backup reconcile carrying optional metrics.
+func reconcileBackupWith(ctx context.Context, ns, name string, rec record.EventRecorder, m *BackupMetrics) reconcile.Result {
 	r := &PBSBackupReconciler{
 		Client:     k8sClient,
 		Scheme:     k8sClient.Scheme(),
 		Recorder:   rec,
 		AgentImage: "pbs-agent:dev",
 		Serializer: serializer,
+		Metrics:    m,
 	}
 	res, err := r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
@@ -790,5 +798,72 @@ var _ = Describe("PBSBackup Controller", func() {
 		staging := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "bk-12", Name: "bk-12-api"}, staging)).To(Succeed())
 		Expect(staging.Data["api.yaml"]).To(ContainSubstring("kind: Secret"))
+	})
+})
+
+// ---- M3: Prometheus metrics on phase transitions --------------------------
+
+var _ = Describe("PBSBackup metrics", func() {
+	ctx := context.Background()
+
+	// driveToCompleted walks one backup New → Running → Completed via direct
+	// reconciles, back-dating StartedAt so the duration gauge is provable.
+	driveToCompleted := func(ns, name string, m *BackupMetrics) {
+		repo := makeReadyRepo(ctx, ns+"-repo")
+		makeLocalPV(ctx, ns+"-pv", "node-a")
+		makePVC(ctx, ns+"-data", ns, ns+"-pv")
+		makeBackup(ctx, name, ns, repo.Name, ns+"-data")
+
+		reconcileBackupWith(ctx, ns, name, record.NewFakeRecorder(16), m)
+
+		// Back-date StartedAt: CompletedAt-StartedAt must land in the gauge.
+		b := fetchBackup(ctx, ns, name)
+		before := b.DeepCopy()
+		early := metav1.NewTime(time.Now().Add(-90 * time.Second))
+		b.Status.StartedAt = &early
+		Expect(k8sClient.Status().Patch(ctx, b, client.MergeFrom(before))).To(Succeed())
+
+		setJobCondition(ctx, ns, name+"-node-a", batchv1.JobCondition{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		})
+		makeResultPod(ctx, ns, name+"-node-a",
+			`{"snapshotRef":"host/x/2026-09-16T10:00:00Z","bytes":1}`)
+		reconcileBackupWith(ctx, ns, name, record.NewFakeRecorder(16), m)
+	}
+
+	It("success transition sets last_success and duration", func() {
+		makeNamespace(ctx, "bk-m1")
+		m := NewBackupMetrics(prometheus.NewRegistry())
+
+		driveToCompleted("bk-m1", "bk-m1", m)
+
+		b := fetchBackup(ctx, "bk-m1", "bk-m1")
+		Expect(b.Status.Phase).To(Equal(pbsv1.BackupPhaseCompleted))
+		last := testutil.ToFloat64(m.LastSuccess.WithLabelValues("bk-m1"))
+		Expect(last).To(BeNumerically(">", 0))
+		Expect(last).To(BeNumerically("~", float64(b.Status.CompletedAt.Unix()), 1))
+		Expect(testutil.ToFloat64(m.Duration.WithLabelValues("bk-m1"))).To(BeNumerically("~", 90, 2))
+		Expect(testutil.ToFloat64(m.Errors.WithLabelValues("bk-m1"))).To(Equal(0.0))
+	})
+
+	It("Failed transition increments errors_total and leaves last_success untouched", func() {
+		makeNamespace(ctx, "bk-m2")
+		m := NewBackupMetrics(prometheus.NewRegistry())
+
+		repo := makeReadyRepo(ctx, "bk-m2-repo")
+		makeLocalPV(ctx, "bk-m2-pv", "node-a")
+		makePVC(ctx, "bk-m2-data", "bk-m2", "bk-m2-pv")
+		makeBackup(ctx, "bk-m2", "bk-m2", repo.Name, "bk-m2-data")
+		reconcileBackupWith(ctx, "bk-m2", "bk-m2", record.NewFakeRecorder(16), m)
+		setJobCondition(ctx, "bk-m2", "bk-m2-node-a", batchv1.JobCondition{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		})
+		reconcileBackupWith(ctx, "bk-m2", "bk-m2", record.NewFakeRecorder(16), m)
+
+		Expect(fetchBackup(ctx, "bk-m2", "bk-m2").Status.Phase).To(Equal(pbsv1.BackupPhaseFailed))
+		Expect(testutil.ToFloat64(m.Errors.WithLabelValues("bk-m2"))).To(Equal(1.0))
+		// The failure gauges stay untouched: never set, never regressed.
+		Expect(testutil.ToFloat64(m.LastSuccess.WithLabelValues("bk-m2"))).To(Equal(0.0))
+		Expect(testutil.ToFloat64(m.Duration.WithLabelValues("bk-m2"))).To(Equal(0.0))
 	})
 })

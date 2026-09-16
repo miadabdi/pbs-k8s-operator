@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +37,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -87,8 +90,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// sweep deletes any suite-labeled PBSRepo/PBSBackup cluster-wide. Normal runs
-// already cleaned up via t.Cleanup; this covers SIGKILLed ones.
+// sweep deletes any suite-labeled PBSRepo/PBSBackup/PBSSchedule cluster-wide.
+// Normal runs already cleaned up via t.Cleanup; this covers SIGKILLed ones.
 func sweep() {
 	if k8s == nil {
 		return
@@ -105,6 +108,12 @@ func sweep() {
 	if err := k8s.List(sctx, backups, client.MatchingLabels{suiteLabel: "true"}); err == nil {
 		for i := range backups.Items {
 			_ = k8s.Delete(sctx, &backups.Items[i])
+		}
+	}
+	schedules := &pbsv1.PBSScheduleList{}
+	if err := k8s.List(sctx, schedules, client.MatchingLabels{suiteLabel: "true"}); err == nil {
+		for i := range schedules.Items {
+			_ = k8s.Delete(sctx, &schedules.Items[i])
 		}
 	}
 }
@@ -200,6 +209,28 @@ func newBackup(t *testing.T, ns, name, repoRef string, pvcs []string) {
 		t.Fatalf("create PBSBackup %s/%s: %v", ns, name, err)
 	}
 	t.Cleanup(func() { _ = k8s.Delete(ctx, b) })
+}
+
+// newSchedule creates a suite-owned PBSSchedule (t.Cleanup deletes it and its
+// labeled backups; the ownerRef GC also reaps them on the live cluster).
+func newSchedule(t *testing.T, ns, name, repoRef, cronSpec string, tmpl pbsv1.PBSBackupTemplate) {
+	t.Helper()
+	s := &pbsv1.PBSSchedule{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{suiteLabel: "true"}},
+		Spec:       pbsv1.PBSScheduleSpec{RepoRef: repoRef, Schedule: cronSpec, Template: tmpl},
+	}
+	if err := k8s.Create(ctx, s); err != nil {
+		t.Fatalf("create PBSSchedule %s/%s: %v", ns, name, err)
+	}
+	t.Cleanup(func() {
+		_ = k8s.Delete(ctx, s)
+		backups := &pbsv1.PBSBackupList{}
+		if err := k8s.List(ctx, backups, client.InNamespace(ns), client.MatchingLabels{"pbsschedule": name}); err == nil {
+			for i := range backups.Items {
+				_ = k8s.Delete(ctx, &backups.Items[i])
+			}
+		}
+	})
 }
 
 // newRepo creates a suite-owned cluster-scoped PBSRepo from the given spec.
@@ -556,4 +587,86 @@ func getSecret(t *testing.T, ns, name string) *corev1.Secret {
 		t.Fatalf("get secret %s/%s: %v", ns, name, err)
 	}
 	return s
+}
+
+// Manager metrics endpoint (secure serving: bearer-authenticated scrape).
+const metricsURL = "https://pbs-operator-controller-manager-metrics-service.pbs-operator-system.svc.cluster.local:8443/metrics"
+
+// scrapeManagerMetrics runs a one-off pod (agent image carries curl) that
+// curls the manager's metrics endpoint with its own service-account token.
+// The SA is bound, for the scrape's lifetime only, to a throwaway ClusterRole
+// granting nonResourceURL /metrics — the endpoint's authn/authz filter
+// otherwise rejects anonymous scrapes. Returns the raw /metrics body.
+func scrapeManagerMetrics(t *testing.T) string {
+	t.Helper()
+	ensureE2ENS(t)
+	name := fmt.Sprintf("e2e-metrics-%d", runID)
+
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{suiteLabel: "true"}},
+		Rules:      []rbacv1.PolicyRule{{NonResourceURLs: []string{"/metrics"}, Verbs: []string{"get"}}},
+	}
+	if err := k8s.Create(ctx, role); err != nil {
+		t.Fatalf("create clusterrole %s: %v", name, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, role) })
+
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: e2eNS}}
+	if err := k8s.Create(ctx, sa); err != nil {
+		t.Fatalf("create serviceaccount %s/%s: %v", e2eNS, name, err)
+	}
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{suiteLabel: "true"}},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: name, Namespace: e2eNS}},
+		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: name},
+	}
+	if err := k8s.Create(ctx, crb); err != nil {
+		t.Fatalf("create clusterrolebinding %s: %v", name, err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, crb) })
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: e2eNS,
+			Labels: map[string]string{suiteLabel: "true", "e2e-verify": name},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: ptr.To[int32](0),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"e2e-verify": name}},
+				Spec: corev1.PodSpec{
+					RestartPolicy:      corev1.RestartPolicyNever,
+					ServiceAccountName: name,
+					Containers: []corev1.Container{{
+						Name:            "scrape",
+						Image:           agentImage,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Command: []string{"sh", "-c",
+							"curl -sfk -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" " + metricsURL},
+					}},
+				},
+			},
+		},
+	}
+	if err := k8s.Create(ctx, job); err != nil {
+		t.Fatalf("create scrape job: %v", err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(ctx, job) })
+	waitJobComplete(t, e2eNS, name, 2*time.Minute)
+	return podLogs(t, e2eNS, name)
+}
+
+// metricLine extracts the numeric value of one `name{namespace="<ns>"}` line
+// from a /metrics body; ok reports presence.
+func metricLine(body, name, ns string) (float64, bool) {
+	re := regexp.MustCompile(regexp.QuoteMeta(name+`{namespace="`+ns+`"}`) + `\s+([0-9.eE+-]+)`)
+	m := re.FindStringSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

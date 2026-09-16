@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -214,13 +215,17 @@ func main() {
 		Recorder:   mgr.GetEventRecorderFor("pbsbackup"),
 		AgentImage: agentImage,
 		Serializer: backuplib.NewSerializer(dynClient, discoClient),
+		// M3: backup phase transitions are exported on the manager's metrics
+		// registry (last_success, duration, errors_total — namespace-labeled).
+		Metrics: controller.NewBackupMetrics(metrics.Registry),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsbackup")
 		os.Exit(1)
 	}
 	if err := (&controller.PBSScheduleReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("pbsschedule"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pbsschedule")
 		os.Exit(1)

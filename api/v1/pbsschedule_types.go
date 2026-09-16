@@ -21,38 +21,65 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// PBSScheduleSpec defines the desired state of PBSSchedule
-type PBSScheduleSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of PBSSchedule. Edit pbsschedule_types.go to remove/update
+// PBSBackupTemplate is the PBSBackup body a PBSSchedule instantiates on each
+// fire: a subset of PBSBackupSpec (the fields that make sense per-fire —
+// RepoRef comes from the schedule itself).
+type PBSBackupTemplate struct {
+	// pvcs is an explicit list of PVC names, as in PBSBackupSpec.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	PVCs []string `json:"pvcs,omitempty"`
+
+	// selector selects PVCs by label, as in PBSBackupSpec.
+	// +optional
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
+
+	// notes is carried verbatim to each created PBSBackup's spec.notes and
+	// from there to the PBS snapshot (proxmox-backup-client --notes). PBS has
+	// no arbitrary snapshot labels, so Notes is THE retention-hint channel:
+	// operators can e.g. encode a keep-policy JSON here; pruning itself stays
+	// server-side.
+	// +optional
+	Notes string `json:"notes,omitempty"`
+}
+
+// PBSScheduleSpec defines the desired state of PBSSchedule.
+type PBSScheduleSpec struct {
+	// repoRef is the name of the cluster-scoped PBSRepo backups are sent to.
+	// +kubebuilder:validation:Required
+	RepoRef string `json:"repoRef"`
+
+	// schedule is a standard 5-field cron expression (minute hour dom month dow).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^(\S+\s+){4}\S+$`
+	Schedule string `json:"schedule"`
+
+	// template is the PBSBackup body created on each fire.
+	// +kubebuilder:validation:Required
+	Template PBSBackupTemplate `json:"template"`
+
+	// suspend stops new backup creation; NextScheduleTime is still computed.
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
 }
 
 // PBSScheduleStatus defines the observed state of PBSSchedule.
 type PBSScheduleStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// lastScheduleTime is the fire time the schedule last created a backup at.
+	// +optional
+	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// nextScheduleTime is the computed next fire time; observability only.
+	// +optional
+	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
 
-	// conditions represent the current state of the PBSSchedule resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// active lists the names of PBSBackups from this schedule that have not
+	// reached a terminal phase yet.
+	// +optional
+	Active []string `json:"active,omitempty"`
+
+	// conditions represent the current state of the PBSSchedule resource:
+	// Ready=True/Valid when the cron parses and the repo is Ready;
+	// Ready=False/InvalidCron or /RepoMissing otherwise.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,6 +88,9 @@ type PBSScheduleStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`
+// +kubebuilder:printcolumn:name="Suspend",type=boolean,JSONPath=`.spec.suspend`
+// +kubebuilder:printcolumn:name="LastSchedule",type=date,JSONPath=`.status.lastScheduleTime`
 
 // PBSSchedule is the Schema for the pbsschedules API
 type PBSSchedule struct {

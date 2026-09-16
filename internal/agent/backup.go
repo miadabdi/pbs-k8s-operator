@@ -75,6 +75,14 @@ func backupArgv(ns, keyfilePath string, pvcs []string, apiDir string) []string {
 	return argv
 }
 
+// notesArgv builds the post-upload command that attaches the retention-hint
+// notes to the fresh snapshot. The backup subcommand has no --notes flag in
+// the real client ("schema does not allow additional properties" — live-
+// verified); `snapshot notes update` is the only channel.
+func notesArgv(ref, notes string) []string {
+	return []string{clientBinary, "snapshot", "notes", "update", ref, notes}
+}
+
 // listArgv builds the snapshot-list command used to find the fresh snapshot.
 func listArgv(ns string) []string {
 	return []string{clientBinary, "snapshot", "list", "--ns", ns, "--output-format", "json"}
@@ -106,7 +114,8 @@ type BackupDeps struct {
 // returns the process exit code. The client binary's stdout/stderr stream
 // through to ours; the termination log receives the controller contract JSON.
 // apiDir (the --api staging mount) adds the api.pxar pair; empty skips it.
-func RunBackup(d BackupDeps, pvcs []string, apiDir, termlogPath string) int {
+// notes (M3) is passed through to the client as --notes=<value>.
+func RunBackup(d BackupDeps, pvcs []string, apiDir, notes, termlogPath string) int {
 	// fail reports an error via the termlog error JSON and our stderr.
 	fail := func(code int, format string, args ...any) int {
 		msg := fmt.Sprintf(format, args...)
@@ -152,6 +161,20 @@ func RunBackup(d BackupDeps, pvcs []string, apiDir, termlogPath string) int {
 	snap, err := latestHostSnapshot(snaps, host)
 	if err != nil {
 		return fail(1, "snapshot list: %v", err)
+	}
+
+	// Step 5.5 (M3): attach the retention-hint notes to the fresh snapshot
+	// (the backup subcommand itself takes no notes flag). Notes are a HINT
+	// channel: the snapshot is already safe, and setting notes needs
+	// Datastore.Modify privileges the backup token may deliberately lack
+	// (live-verified: testenv's producer token is Backup-only) — so a notes
+	// failure is a loud stderr warning, never a failed backup.
+	if notes != "" {
+		errBuf.Reset()
+		if err := d.Run(notesArgv(snapshotRef(snap), notes), env, io.Discard, tee); err != nil {
+			fmt.Fprintf(d.Stderr, "pbs-agent: WARNING: snapshot %s uploaded, but setting notes failed: %s\n",
+				snapshotRef(snap), firstLine(errBuf.String()))
+		}
 	}
 
 	// Step 6: report the result to the termlog and stdout.
@@ -259,10 +282,10 @@ func firstLine(s string) string {
 }
 
 // ParseBackupArgs parses `backup --pvc <name> [--pvc <name>...] [--api <dir>]
-// [--termlog <path>]`. The termlog path defaults to $TERMLOG, then
-// /dev/termination-log. At least one --pvc or an --api dir is required
+// [--notes <value>] [--termlog <path>]`. The termlog path defaults to $TERMLOG,
+// then /dev/termination-log. At least one --pvc or an --api dir is required
 // (API-only backups have no PVCs).
-func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, apiDir, termlog string, err error) {
+func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, apiDir, notes, termlog string, err error) {
 	termlog = strings.TrimSpace(getenv("TERMLOG"))
 	if termlog == "" {
 		termlog = "/dev/termination-log"
@@ -271,17 +294,18 @@ func ParseBackupArgs(args []string, getenv func(string) string) (pvcs []string, 
 	fs.SetOutput(io.Discard)
 	fs.Var(&pvcFlag{&pvcs}, "pvc", "PVC name (repeatable; mounted at /backup/<name>)")
 	fs.StringVar(&apiDir, "api", "", "directory with the serialized API objects (staging ConfigMap mount)")
+	fs.StringVar(&notes, "notes", "", "retention notes carried to the PBS snapshot")
 	fs.StringVar(&termlog, "termlog", termlog, "termination log path")
 	if err := fs.Parse(args); err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 	if len(pvcs) == 0 && apiDir == "" {
-		return nil, "", "", errors.New("backup: at least one --pvc or --api is required")
+		return nil, "", "", "", errors.New("backup: at least one --pvc or --api is required")
 	}
 	if fs.NArg() > 0 {
-		return nil, "", "", fmt.Errorf("backup: unexpected arguments: %s", strings.Join(fs.Args(), " "))
+		return nil, "", "", "", fmt.Errorf("backup: unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	return pvcs, apiDir, termlog, nil
+	return pvcs, apiDir, notes, termlog, nil
 }
 
 // pvcFlag collects repeated --pvc values.
