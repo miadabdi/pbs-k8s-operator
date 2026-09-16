@@ -180,7 +180,7 @@ load-image: ## Save images to testenv/.image-cache and import them into the Vagr
 
 .PHONY: e2e-live
 e2e-live: ## Run e2e tests against the live testenv cluster (run testenv-up first).
-	KUBECONFIG=testenv/artifacts/admin.conf go test -tags=e2e ./test/e2e/...
+	KUBECONFIG=$(abspath testenv/artifacts/admin.conf) go test -tags=e2e ./test/e2e/ -v -count=1
 
 .PHONY: testenv-up
 testenv-up: ## Bring up the Vagrant-based test environment (testenv/scripts/up.sh).
